@@ -1,0 +1,8 @@
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+cap-state.jsonl
+identity.json
+identity-evm.json
+*.test
+*.out

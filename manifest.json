@@ -1,0 +1,78 @@
+{
+  "id": "io.pilot.wallet",
+  "app_version": "0.3.0",
+  "manifest_version": 2,
+  "binary": {
+    "runtime": "go",
+    "path": "bin/wallet",
+    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  },
+  "exposes": [
+    "wallet.balance",
+    "wallet.balances",
+    "wallet.address",
+    "wallet.request",
+    "wallet.pay",
+    "wallet.verify",
+    "wallet.settle",
+    "wallet.topup",
+    "wallet.history",
+    "wallet.spend_caps",
+    "wallet.evm.address",
+    "wallet.evm.balance",
+    "wallet.evm.satisfy",
+    "wallet.evm.verify",
+    "wallet.hookPreSendMessage",
+    "wallet.hookPostRecvMessage"
+  ],
+  "grants": [
+    {"cap": "fs.write", "target": "$APP/data.db"},
+    {"cap": "fs.read",  "target": "$APP/data.db"},
+    {"cap": "fs.read",  "target": "$APP/identity.json"},
+    {"cap": "fs.write", "target": "$APP/identity.json"},
+    {"cap": "fs.read",  "target": "$APP/identity-evm.json"},
+    {"cap": "fs.write", "target": "$APP/identity-evm.json"},
+    {"cap": "audit.log","target": "*"},
+    {"cap": "net.dial", "target": "*.pilot",
+     "if": {"kind": "rate", "params": {"per": "min", "limit": 100}}},
+    {"cap": "net.dial", "target": "*.base.org",
+     "if": {"kind": "rate", "params": {"per": "min", "limit": 60}}},
+    {"cap": "key.sign", "target": "x402-auth",
+     "if": {"kind": "cap", "params": {"asset": "USDC", "per": "day", "limit": 100}}},
+    {"cap": "key.sign", "target": "evm-eip3009",
+     "if": {"kind": "cap", "params": {"asset": "USDC", "per": "day", "limit": 100}}}
+  ],
+  "protection": "guarded",
+  "store": {
+    "publisher": "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    "signature": "sig:placeholder-store-sig-replaced-at-publish-time"
+  },
+  "affiliates": [
+    {
+      "pubkey": "ed25519:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+      "role": "settlement",
+      "purpose": "x402 settlement notary"
+    }
+  ],
+  "extends": [
+    {
+      "primitive": "send-message.pre",
+      "method": "wallet.hookPreSendMessage",
+      "adds_flags": [
+        {"name": "--paywall", "type": "string", "help": "lock payload behind a payment contract, e.g. '100 USDC'"},
+        {"name": "--method",  "type": "string", "help": "payment method id (default: io.pilot.wallet/v1)"},
+        {"name": "--escrow",  "type": "string", "help": "escrow id (default: io.pilot.wallet/escrow-v1)"}
+      ]
+    },
+    {
+      "primitive": "recv.post",
+      "method": "wallet.hookPostRecvMessage"
+    }
+  ],
+  "dynamic_extends": [
+    "wallet.pay.pre",
+    "wallet.pay.post",
+    "wallet.evm.satisfy.pre",
+    "wallet.evm.satisfy.post"
+  ]
+}
