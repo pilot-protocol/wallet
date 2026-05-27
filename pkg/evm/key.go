@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
@@ -53,7 +54,19 @@ func (a *Address) UnmarshalJSON(b []byte) error {
 }
 
 // ParseAddress parses a hex string (with or without 0x prefix) into an
-// Address. Returns an error if the input is not exactly 20 bytes.
+// Address. Returns an error if the input is not exactly 20 bytes OR if
+// the input is mixed-case and the EIP-55 checksum doesn't match.
+//
+// EIP-55 rules:
+//   - All-lowercase / all-uppercase input carries no checksum signal
+//     and is accepted as-is (interoperability with non-checksumming
+//     wallets).
+//   - Mixed-case input must match the canonical EIP-55 form
+//     (case-of-each-hex-digit encodes one bit from
+//     keccak256(lowercase(addr))). One typo'd character changes the
+//     expected case at many positions; checksum match is essentially
+//     impossible by chance, so a mismatch is a strong signal of a
+//     paste error or substitution attack.
 func ParseAddress(s string) (Address, error) {
 	var a Address
 	if len(s) >= 2 && (s[:2] == "0x" || s[:2] == "0X") {
@@ -67,7 +80,47 @@ func ParseAddress(s string) (Address, error) {
 		return a, fmt.Errorf("evm: address hex: %w", err)
 	}
 	copy(a[:], b)
+
+	// EIP-55 check: skip when input is uniformly-cased (no signal),
+	// enforce when input is mixed-case.
+	hasLower := strings.ContainsAny(s, "abcdef")
+	hasUpper := strings.ContainsAny(s, "ABCDEF")
+	if hasLower && hasUpper {
+		if want := a.Checksum(); want[2:] != s {
+			return Address{}, fmt.Errorf("evm: address %s has invalid EIP-55 checksum (expected %s)", "0x"+s, want)
+		}
+	}
 	return a, nil
+}
+
+// Checksum returns the EIP-55-encoded representation of the address
+// ("0x" + 40 hex chars with case set per keccak256(lowercase) bits).
+func (a Address) Checksum() string {
+	lower := hex.EncodeToString(a[:])
+	hash := Keccak256([]byte(lower))
+	out := make([]byte, 0, 42)
+	out = append(out, '0', 'x')
+	for i := 0; i < len(lower); i++ {
+		c := lower[i]
+		if c >= '0' && c <= '9' {
+			out = append(out, c)
+			continue
+		}
+		// hash[i/2] high nibble for even i, low nibble for odd i;
+		// uppercase the hex char when the nibble's top bit is set.
+		var nibble byte
+		if i%2 == 0 {
+			nibble = hash[i/2] >> 4
+		} else {
+			nibble = hash[i/2] & 0x0F
+		}
+		if nibble >= 8 {
+			out = append(out, c-32) // 'a'-'z' → 'A'-'Z'
+		} else {
+			out = append(out, c)
+		}
+	}
+	return string(out)
 }
 
 // EVMSigner holds a secp256k1 private key and its derived EVM address.
