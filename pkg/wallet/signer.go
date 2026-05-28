@@ -139,10 +139,8 @@ func saveLocalSigner(path string, s *LocalSigner) error {
 		Pubkey:    hex.EncodeToString(s.pub),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
-	body, err := json.MarshalIndent(&f, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal: %w", err)
-	}
+	// identityFile is all strings — json.MarshalIndent cannot fail.
+	body, _ := json.MarshalIndent(&f, "", "  ")
 	// Write to a tmp then rename — never leave a half-written identity file.
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, body, 0o600); err != nil {
