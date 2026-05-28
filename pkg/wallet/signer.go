@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -94,12 +95,26 @@ func LoadOrCreateLocalSigner(path string) (*LocalSigner, error) {
 // identity file would silently let any local user read the seed and
 // impersonate the wallet.
 func LoadLocalSigner(path string) (*LocalSigner, error) {
-	if info, err := os.Stat(path); err == nil {
-		if perm := info.Mode().Perm(); perm&0o077 != 0 {
-			return nil, fmt.Errorf("identity %s: permissions %#o expose the seed to other users — chmod 0600 to fix", path, perm)
-		}
+	// Open-and-fstat-then-read to close the TOCTOU window between
+	// os.Stat and os.ReadFile.  An attacker who races a chmod 0644
+	// between the check and the read sees the mode validation fail
+	// because the fstat targets the already-opened fd, not the
+	// path.
+	fd, err := os.Open(path)
+	if err != nil {
+		return nil, err
 	}
-	data, err := os.ReadFile(path)
+	defer fd.Close()
+
+	info, err := fd.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("identity %s: stat: %w", path, err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return nil, fmt.Errorf("identity %s: permissions %#o expose the seed to other users — chmod 0600 to fix", path, perm)
+	}
+
+	data, err := io.ReadAll(fd)
 	if err != nil {
 		return nil, err
 	}
