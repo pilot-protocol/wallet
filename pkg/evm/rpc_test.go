@@ -182,3 +182,33 @@ func TestHexHelpersRoundtrip(t *testing.T) {
 		}
 	}
 }
+
+// TestHexHelpers_ErrorPaths covers each rejection branch of hexToUint64
+// and hexToBigInt: missing 0x prefix, non-hex characters, value too
+// large for uint64.
+func TestHexHelpers_ErrorPaths(t *testing.T) {
+	t.Parallel()
+	if _, err := hexToUint64("no-prefix"); err == nil {
+		t.Error("hexToUint64 should reject input without 0x prefix")
+	}
+	if _, err := hexToUint64("0xZZZZ"); err == nil {
+		t.Error("hexToUint64 should reject non-hex characters")
+	}
+	// 17-digit hex value overflows uint64.
+	if _, err := hexToUint64("0x10000000000000000"); err == nil {
+		t.Error("hexToUint64 should reject value too large for uint64")
+	}
+	if _, err := hexToBigInt("no-prefix"); err == nil {
+		t.Error("hexToBigInt should reject input without 0x prefix")
+	}
+	if _, err := hexToBigInt("0xZZZZ"); err == nil {
+		t.Error("hexToBigInt should reject non-hex characters")
+	}
+	// Empty-after-prefix returns 0 cleanly for both.
+	if got, err := hexToUint64("0x"); err != nil || got != 0 {
+		t.Errorf("hexToUint64(0x) = (%d, %v), want (0, nil)", got, err)
+	}
+	if got, err := hexToBigInt("0x"); err != nil || got == nil || got.Sign() != 0 {
+		t.Errorf("hexToBigInt(0x) = (%v, %v), want (0, nil)", got, err)
+	}
+}

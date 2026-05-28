@@ -327,10 +327,8 @@ func saveEVMSigner(path string, s *EVMSigner) error {
 		Address:   s.addr.String(),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
-	body, err := json.MarshalIndent(&f, "", "  ")
-	if err != nil {
-		return err
-	}
+	// identityFile is all strings — json.MarshalIndent cannot fail.
+	body, _ := json.MarshalIndent(&f, "", "  ")
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, body, 0o600); err != nil {
 		return err

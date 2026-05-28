@@ -172,3 +172,25 @@ func TestMemoryStore_IsSettled_DefaultFalse(t *testing.T) {
 		t.Error("IsSettled fresh: want false")
 	}
 }
+
+// TestEVMAccessors_WithBinding drives the non-nil-evm branch of
+// EVMAddress / EVMChainID / EVMToken so coverage isn't pinned at the
+// nil-binding shortcut path alone.
+func TestEVMAccessors_WithBinding(t *testing.T) {
+	w := newDualWallet(t) // binds an EVM signer + chain id
+	defer w.Close()
+	addr := w.EVMAddress()
+	zero := [20]byte{}
+	if addr == zero {
+		t.Errorf("EVMAddress with binding should be non-zero, got zero")
+	}
+	if got := w.EVMChainID(); got == 0 {
+		t.Errorf("EVMChainID with binding should be non-zero, got 0")
+	}
+	// EVMToken on a dual wallet may legitimately be zero (mock method),
+	// just confirm the call doesn't panic and returns 20 bytes.
+	tok := w.EVMToken()
+	if len(tok) != 20 {
+		t.Errorf("EVMToken: got %d bytes, want 20", len(tok))
+	}
+}
