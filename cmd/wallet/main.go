@@ -150,12 +150,18 @@ func run(ctx context.Context, args []string) error {
 	if err := os.MkdirAll(filepath.Dir(*sockPath), 0o700); err != nil {
 		return fmt.Errorf("socket dir: %w", err)
 	}
+	// Set umask to 0o177 before Listen so the unix-domain socket
+	// is created as 0o600 atomically — no TOCTOU window between
+	// socket creation and a post-hoc Chmod.
+	oldMask := syscall.Umask(0o177)
 	listener, err := net.Listen("unix", *sockPath)
+	syscall.Umask(oldMask)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", *sockPath, err)
 	}
-	// Limit who can open the socket. 0600 means only the owning user can
-	// dial — same threat model as the identity file.
+	// Chmod is a belt-and-suspenders backup; the umask above covers
+	// the primary case. On the off-chance a platform doesn't apply
+	// umask to unix sockets, the explicit chmod is the fallback.
 	if err := os.Chmod(*sockPath, 0o600); err != nil {
 		logger.Printf("chmod socket: %v", err)
 	}
