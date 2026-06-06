@@ -14,8 +14,8 @@ github.com/mattn/go-isatty v0.0.20 h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWE
 github.com/mattn/go-isatty v0.0.20/go.mod h1:W+V8PltTTMOvKvAeJH7IuucS94S2C6jfK/D7dTCTo3Y=
 github.com/ncruces/go-strftime v1.0.0 h1:HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOFAw7w=
 github.com/ncruces/go-strftime v1.0.0/go.mod h1:Fwc5htZGVVkseilnfgOVb9mKy6w1naJmn9CehxcKcls=
-github.com/pilot-protocol/app-store v1.0.0-rc1 h1:IyeN7CadmNqesGuh9T3OR/xb5S4GaZl7vSHlXBhUez8=
-github.com/pilot-protocol/app-store v1.0.0-rc1/go.mod h1:0fo1XjzzLHmRMGuTc22aOLAseQzms7qM4QXfGilmMWY=
+github.com/pilot-protocol/app-store v1.0.1-beta.1 h1:8CIzfNkFNLO17Es+XV8JSF336JJgqUGLNBcXYMMZcMo=
+github.com/pilot-protocol/app-store v1.0.1-beta.1/go.mod h1:cOvtwcrp7iDZfMKaHY4KE8dvhKoOoO7MdRhnbSBKVXw=
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE=
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec/go.mod h1:qqbHyh8v60DhA7CoWK5oRCqLrMHRGoxYCSS9EjAz6Eo=
 golang.org/x/crypto v0.51.0 h1:IBPXwPfKxY7cWQZ38ZCIRPI50YLeevDLlLnyC5wRGTI=
