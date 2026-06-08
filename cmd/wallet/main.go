@@ -48,7 +48,7 @@ const shutdownGrace = 5 * time.Second
 // Version is the wallet binary's release tag. Kept in sync with the
 // app_version field in manifest.json — `manifest_test.go` cross-checks
 // they agree, so a release without bumping both fails CI.
-const Version = "0.3.2"
+const Version = "0.3.3"
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -72,7 +72,7 @@ func run(ctx context.Context, args []string) error {
 		mfPath    = fs.String("manifest", "", "path to manifest.json; when set, key.sign:cap grants activate runtime spend caps")
 		capState  = fs.String("cap-state", "", "JSONL spend log; persists rolling-window cap state across wallet restarts so caps aren't bypassable by daemon-restart")
 		evmIDPath  = fs.String("evm-identity", defaultPath("identity-evm.json"), "secp256k1 identity for EVM/USDC payments (created on first start)")
-		evmChains  = fs.String("evm-chains", "8453", "comma-separated EVM chain IDs to enable. First is primary (used when wallet.evm.* requests omit chain_id). Known: 1=Ethereum, 8453=Base, 137=Polygon, 84532=Base Sepolia. Example: 8453,1,137")
+		evmChains  = fs.String("evm-chains", "8453,1,137", "comma-separated EVM chain IDs to enable. First is primary (used when wallet.evm.* requests omit chain_id). Known: 1=Ethereum, 8453=Base, 137=Polygon, 84532=Base Sepolia. $PILOT_EVM_CHAINS overrides this when --evm-chains was left at the default.")
 		evmRPC     = fs.String("evm-rpc", "", "PRIMARY chain's JSON-RPC endpoint. For per-chain endpoints use PILOT_EVM_RPC_<CHAINID> env vars (e.g. PILOT_EVM_RPC_137=https://polygon-rpc.com). Falls back to $PILOT_EVM_RPC for the primary chain.")
 		evmOff     = fs.Bool("no-evm", false, "disable every wallet.evm.* method (no secp256k1 key created)")
 		showVer   = fs.Bool("version", false, "print version and exit")
@@ -132,7 +132,13 @@ func run(ctx context.Context, args []string) error {
 		if err != nil {
 			return fmt.Errorf("evm identity: %w", err)
 		}
-		ids, err := parseChainIDs(*evmChains)
+		chainsArg := *evmChains
+		if chainsArg == "8453,1,137" { // default — let env override
+			if env := os.Getenv("PILOT_EVM_CHAINS"); env != "" {
+				chainsArg = env
+			}
+		}
+		ids, err := parseChainIDs(chainsArg)
 		if err != nil {
 			return fmt.Errorf("evm chains: %w", err)
 		}

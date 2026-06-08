@@ -1,6 +1,6 @@
 {
   "id": "io.pilot.wallet",
-  "app_version": "0.3.2",
+  "app_version": "0.3.3",
   "manifest_version": 2,
   "binary": {
     "runtime": "go",
