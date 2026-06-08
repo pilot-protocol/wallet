@@ -11,15 +11,21 @@ const (
 	// ChainID values per chainlist.org.
 	ChainEthereumMainnet uint64 = 1
 	ChainBaseMainnet     uint64 = 8453
+	ChainPolygonMainnet  uint64 = 137
 	ChainBaseSepolia     uint64 = 84532
 )
 
 // USDC contract addresses. Keep these as string constants and parse on
 // demand so the package has no init-time hard failure if hex parsing
 // somehow disagrees.
+//
+// Polygon: native Circle-issued USDC at 0x3c499c…, not the older
+// bridged USDC.e at 0x2791bca… — only the native version exposes
+// EIP-3009 transferWithAuthorization.
 const (
 	usdcEthereumMainnet = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
 	usdcBaseMainnet     = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+	usdcPolygonMainnet  = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
 	usdcBaseSepolia     = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
 )
 
@@ -33,12 +39,26 @@ func USDCAddress(chainID uint64) (Address, error) {
 		s = usdcEthereumMainnet
 	case ChainBaseMainnet:
 		s = usdcBaseMainnet
+	case ChainPolygonMainnet:
+		s = usdcPolygonMainnet
 	case ChainBaseSepolia:
 		s = usdcBaseSepolia
 	default:
 		return Address{}, errChainUnknown(chainID)
 	}
 	return ParseAddress(s)
+}
+
+// KnownChainIDs is the list of chain IDs the wallet recognises out of
+// the box. Multichain wallet startup can iterate this to set up
+// bindings for every supported chain.
+func KnownChainIDs() []uint64 {
+	return []uint64{
+		ChainEthereumMainnet,
+		ChainBaseMainnet,
+		ChainPolygonMainnet,
+		ChainBaseSepolia,
+	}
 }
 
 // USDCDomain returns the EIP-712 Domain for USDC on chainID, ready to
@@ -117,6 +137,7 @@ var knownTokens = func() map[uint64]map[Address]KnownToken {
 	}{
 		{ChainEthereumMainnet, usdcEthereumMainnet, KnownToken{"USDC", 6}},
 		{ChainBaseMainnet, usdcBaseMainnet, KnownToken{"USDC", 6}},
+		{ChainPolygonMainnet, usdcPolygonMainnet, KnownToken{"USDC", 6}},
 		{ChainBaseSepolia, usdcBaseSepolia, KnownToken{"USDC", 6}},
 		{ChainEthereumMainnet, usdtEthereumMainnet, KnownToken{"USDT", 6}},
 		{ChainBaseMainnet, usdtBaseMainnet, KnownToken{"USDT", 6}},
