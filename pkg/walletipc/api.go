@@ -31,6 +31,7 @@ const (
 	MethodEVMBalance = "wallet.evm.balance"
 	MethodEVMSatisfy = "wallet.evm.satisfy"
 	MethodEVMVerify  = "wallet.evm.verify"
+	MethodEVMChains  = "wallet.evm.chains"
 )
 
 // AllMethods is the canonical set the dispatcher registers. Used by
@@ -45,7 +46,7 @@ var AllMethods = []string{
 // wallet has EVM support. NewDispatcher returns AllMethods + (this set
 // when applicable).
 var AllEVMMethods = []string{
-	MethodEVMAddress, MethodEVMBalance, MethodEVMSatisfy, MethodEVMVerify,
+	MethodEVMAddress, MethodEVMBalance, MethodEVMSatisfy, MethodEVMVerify, MethodEVMChains,
 }
 
 // ── balance ──────────────────────────────────────────────────────────────
@@ -166,10 +167,24 @@ type SpendCapsResp struct {
 // constructed with NewWithEVM. On a wallet without an EVM binding,
 // these methods are absent — callers get a "method not found" reply.
 
+// Multichain extension: every EVM request now accepts an optional
+// `chain_id` field. Omitted (or 0) means "use the primary chain"
+// (the first one configured at startup) — preserves the single-chain
+// shape callers wrote against v0.3.1. Non-zero routes to that chain's
+// binding, with a "chain X not configured" error when missing.
+
+type EVMAddressReq struct {
+	ChainID uint64 `json:"chain_id,omitempty"`
+}
+
 type EVMAddressResp struct {
 	Address string `json:"address"`  // 0x-prefixed lowercase hex
 	ChainID uint64 `json:"chain_id"` // e.g. 8453 for Base mainnet
 	Token   string `json:"token"`    // 0x-prefixed token contract address
+}
+
+type EVMBalanceReq struct {
+	ChainID uint64 `json:"chain_id,omitempty"`
 }
 
 type EVMBalanceResp struct {
@@ -183,7 +198,8 @@ type EVMBalanceResp struct {
 // EVMSatisfyReq wraps a payment.Contract verbatim. Receivers send this
 // to ask the wallet to produce a signed EIP-3009 receipt.
 type EVMSatisfyReq struct {
-	Contract any `json:"contract"` // payment.Contract — typed loosely here to avoid an import cycle; the handler deserializes properly.
+	ChainID  uint64 `json:"chain_id,omitempty"`
+	Contract any    `json:"contract"` // payment.Contract — typed loosely here to avoid an import cycle; the handler deserializes properly.
 }
 
 type EVMSatisfyResp struct {
@@ -191,10 +207,27 @@ type EVMSatisfyResp struct {
 }
 
 type EVMVerifyReq struct {
-	Contract any `json:"contract"` // payment.Contract
-	Receipt  any `json:"receipt"`  // payment.Receipt
+	ChainID  uint64 `json:"chain_id,omitempty"`
+	Contract any    `json:"contract"` // payment.Contract
+	Receipt  any    `json:"receipt"`  // payment.Receipt
 }
 
 type EVMVerifyResp struct {
 	OK bool `json:"ok"`
+}
+
+// EVMChainsResp lists every chain this wallet is configured for. The
+// `chains` array preserves the order configured at startup; the
+// `primary` field repeats the first entry for callers that only need
+// the default. Operators use this to discover what chain IDs the
+// dispatcher accepts before sending a satisfy/balance request.
+type EVMChainsResp struct {
+	Primary uint64        `json:"primary"`
+	Chains  []ChainConfig `json:"chains"`
+}
+
+type ChainConfig struct {
+	ChainID    uint64 `json:"chain_id"`
+	Token      string `json:"token"`
+	RPCEnabled bool   `json:"rpc_enabled"`
 }

@@ -65,10 +65,20 @@ type Wallet struct {
 	escrowOnce sync.Once
 	escrow     *WalletEscrow
 
-	// evm holds the (optional) on-chain wallet state. nil when the
-	// wallet was constructed without an EVM signer. Concrete type
-	// lives in hooks_evm.go to keep the chain-related code together.
+	// evm holds the (optional) primary on-chain wallet state. nil when
+	// the wallet was constructed without an EVM signer. The primary
+	// binding is reported by the parameterless legacy accessors
+	// (EVMAddress / EVMChainID / EVMBalance) so single-chain callers
+	// keep working unchanged. Multichain callers either iterate
+	// evmByChain or pass an explicit chainID to the parameterised
+	// siblings. Concrete type lives in hooks_evm.go.
 	evm *evmBinding
+
+	// evmByChain is the multichain registry: chainID → binding.
+	// Always includes evm (the primary) when evm != nil. Nil when no
+	// EVM support is configured. Built once at construction in
+	// NewWithEVMs and read-only after that, so no mutex needed.
+	evmByChain map[uint64]*evmBinding
 
 	// Spend cap state — declared in spendcap.go, fields here for
 	// embedding so the cap check + recordSpend can stay atomic via

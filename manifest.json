@@ -1,6 +1,6 @@
 {
   "id": "io.pilot.wallet",
-  "app_version": "0.3.1",
+  "app_version": "0.3.2",
   "manifest_version": 2,
   "binary": {
     "runtime": "go",
@@ -22,6 +22,7 @@
     "wallet.evm.balance",
     "wallet.evm.satisfy",
     "wallet.evm.verify",
+    "wallet.evm.chains",
     "wallet.hookPreSendMessage",
     "wallet.hookPostRecvMessage"
   ],

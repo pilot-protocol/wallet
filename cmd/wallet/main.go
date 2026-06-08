@@ -27,6 +27,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -46,7 +48,7 @@ const shutdownGrace = 5 * time.Second
 // Version is the wallet binary's release tag. Kept in sync with the
 // app_version field in manifest.json — `manifest_test.go` cross-checks
 // they agree, so a release without bumping both fails CI.
-const Version = "0.3.1"
+const Version = "0.3.2"
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -69,10 +71,10 @@ func run(ctx context.Context, args []string) error {
 		idPath    = fs.String("identity", defaultPath("identity.json"), "ed25519 identity file (created on first start)")
 		mfPath    = fs.String("manifest", "", "path to manifest.json; when set, key.sign:cap grants activate runtime spend caps")
 		capState  = fs.String("cap-state", "", "JSONL spend log; persists rolling-window cap state across wallet restarts so caps aren't bypassable by daemon-restart")
-		evmIDPath = fs.String("evm-identity", defaultPath("identity-evm.json"), "secp256k1 identity for EVM/USDC payments (created on first start)")
-		evmChain  = fs.Uint64("evm-chain", evm.ChainBaseMainnet, "EVM chain ID (8453=Base, 1=Ethereum mainnet, 84532=Base Sepolia)")
-		evmRPC    = fs.String("evm-rpc", "", "EVM JSON-RPC endpoint for balance reads; env PILOT_EVM_RPC also honoured. Empty leaves wallet.evm.balance saying 'no rpc'")
-		evmOff    = fs.Bool("no-evm", false, "disable the wallet.evm.* methods entirely (no secp256k1 key created)")
+		evmIDPath  = fs.String("evm-identity", defaultPath("identity-evm.json"), "secp256k1 identity for EVM/USDC payments (created on first start)")
+		evmChains  = fs.String("evm-chains", "8453", "comma-separated EVM chain IDs to enable. First is primary (used when wallet.evm.* requests omit chain_id). Known: 1=Ethereum, 8453=Base, 137=Polygon, 84532=Base Sepolia. Example: 8453,1,137")
+		evmRPC     = fs.String("evm-rpc", "", "PRIMARY chain's JSON-RPC endpoint. For per-chain endpoints use PILOT_EVM_RPC_<CHAINID> env vars (e.g. PILOT_EVM_RPC_137=https://polygon-rpc.com). Falls back to $PILOT_EVM_RPC for the primary chain.")
+		evmOff     = fs.Bool("no-evm", false, "disable every wallet.evm.* method (no secp256k1 key created)")
 		showVer   = fs.Bool("version", false, "print version and exit")
 	)
 	fs.SetOutput(os.Stderr)
@@ -110,14 +112,18 @@ func run(ctx context.Context, args []string) error {
 	}()
 
 	// EVM side. Created when --no-evm is NOT passed AND the secp256k1
-	// keyfile can be loaded or freshly generated. RPC is optional —
-	// without it the wallet still signs EIP-3009 authorizations, but
-	// wallet.evm.balance reports "no RPC configured" instead of a
-	// live on-chain read.
+	// keyfile can be loaded or freshly generated.
 	//
-	// Disabling EVM is supported (--no-evm) so dev / test runs that
-	// don't need on-chain methods don't pay the cost of generating a
-	// secp256k1 keypair on first start.
+	// Multichain: --evm-chains is a comma-separated list. The first
+	// is the primary (used when wallet.evm.* requests omit chain_id).
+	// Each chain gets its own optional RPC endpoint:
+	//   - primary chain uses --evm-rpc (or $PILOT_EVM_RPC if --evm-rpc
+	//     is empty)
+	//   - every other chain reads $PILOT_EVM_RPC_<CHAINID>
+	//
+	// Wallets without RPC for a chain still sign EIP-3009
+	// authorizations correctly; wallet.evm.balance just reports
+	// rpc_enabled=false rather than a live read.
 	var w *wallet.Wallet
 	if *evmOff {
 		w = wallet.New(wallet.Address(*addr), signer, store)
@@ -126,22 +132,30 @@ func run(ctx context.Context, args []string) error {
 		if err != nil {
 			return fmt.Errorf("evm identity: %w", err)
 		}
-		// --evm-rpc beats env so an operator can override per-app.
-		rpc := *evmRPC
-		if rpc == "" {
-			rpc = os.Getenv("PILOT_EVM_RPC")
+		ids, err := parseChainIDs(*evmChains)
+		if err != nil {
+			return fmt.Errorf("evm chains: %w", err)
 		}
-		cfg := wallet.EVMConfig{
-			Signer:      evmSigner,
-			ChainID:     *evmChain,
-			RPCEndpoint: rpc,
+		cfgs := make([]wallet.EVMConfig, len(ids))
+		for i, id := range ids {
+			rpc := perChainRPC(id, i, *evmRPC)
+			cfgs[i] = wallet.EVMConfig{
+				Signer:      evmSigner,
+				ChainID:     id,
+				RPCEndpoint: rpc,
+			}
 		}
-		w, err = wallet.NewWithEVM(wallet.Address(*addr), signer, store, cfg)
+		w, err = wallet.NewWithEVMs(wallet.Address(*addr), signer, store, cfgs)
 		if err != nil {
 			return fmt.Errorf("evm wallet: %w", err)
 		}
-		logger.Printf("evm: addr=%s chain=%d token=%s rpc=%v",
-			w.EVMAddress().Hex(), *evmChain, w.EVMToken().Hex(), rpc != "")
+		// One log line per chain so an operator inspecting the daemon
+		// log can confirm exactly which chains landed + whether each
+		// has live-balance access.
+		for _, id := range w.EVMChainIDs() {
+			logger.Printf("evm: addr=%s chain=%d token=%s rpc=%v",
+				w.EVMAddress().Hex(), id, w.EVMTokenFor(id).Hex(), w.HasEVMRPCFor(id))
+		}
 	}
 	defer w.Close()
 
@@ -298,4 +312,54 @@ func defaultPath(name string) string {
 		return name
 	}
 	return filepath.Join(home, ".pilot", "apps", "io.pilot.wallet", name)
+}
+
+// parseChainIDs splits a comma-separated chain id string into a slice
+// of uint64s. Whitespace is tolerated around the commas; an empty
+// string is rejected because the caller already validated --no-evm
+// wasn't passed.
+func parseChainIDs(s string) ([]uint64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, errors.New("empty chain list")
+	}
+	parts := strings.Split(s, ",")
+	out := make([]uint64, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		id, err := strconv.ParseUint(p, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("chain id %q: %w", p, err)
+		}
+		out = append(out, id)
+	}
+	if len(out) == 0 {
+		return nil, errors.New("no chain ids parsed")
+	}
+	return out, nil
+}
+
+// perChainRPC returns the JSON-RPC endpoint to use for chainID.
+// idx is the chain's position in --evm-chains (0 = primary). Lookup
+// order:
+//   - For the primary chain (idx==0): --evm-rpc beats $PILOT_EVM_RPC.
+//   - Every chain: PILOT_EVM_RPC_<chainID> if set, falling through to
+//     the primary lookup above when it isn't.
+//
+// Returning empty is fine — the wallet still signs without RPC; only
+// wallet.evm.balance changes shape.
+func perChainRPC(chainID uint64, idx int, primaryFlag string) string {
+	if v := os.Getenv(fmt.Sprintf("PILOT_EVM_RPC_%d", chainID)); v != "" {
+		return v
+	}
+	if idx == 0 {
+		if primaryFlag != "" {
+			return primaryFlag
+		}
+		return os.Getenv("PILOT_EVM_RPC")
+	}
+	return ""
 }
