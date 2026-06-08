@@ -33,6 +33,7 @@ import (
 
 	"github.com/pilot-protocol/app-store/pkg/ipc"
 	"github.com/pilot-protocol/app-store/pkg/manifest"
+	"github.com/pilot-protocol/wallet/pkg/evm"
 	"github.com/pilot-protocol/wallet/pkg/wallet"
 	"github.com/pilot-protocol/wallet/pkg/walletipc"
 )
@@ -45,7 +46,7 @@ const shutdownGrace = 5 * time.Second
 // Version is the wallet binary's release tag. Kept in sync with the
 // app_version field in manifest.json — `manifest_test.go` cross-checks
 // they agree, so a release without bumping both fails CI.
-const Version = "0.3.0"
+const Version = "0.3.1"
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -68,6 +69,10 @@ func run(ctx context.Context, args []string) error {
 		idPath    = fs.String("identity", defaultPath("identity.json"), "ed25519 identity file (created on first start)")
 		mfPath    = fs.String("manifest", "", "path to manifest.json; when set, key.sign:cap grants activate runtime spend caps")
 		capState  = fs.String("cap-state", "", "JSONL spend log; persists rolling-window cap state across wallet restarts so caps aren't bypassable by daemon-restart")
+		evmIDPath = fs.String("evm-identity", defaultPath("identity-evm.json"), "secp256k1 identity for EVM/USDC payments (created on first start)")
+		evmChain  = fs.Uint64("evm-chain", evm.ChainBaseMainnet, "EVM chain ID (8453=Base, 1=Ethereum mainnet, 84532=Base Sepolia)")
+		evmRPC    = fs.String("evm-rpc", "", "EVM JSON-RPC endpoint for balance reads; env PILOT_EVM_RPC also honoured. Empty leaves wallet.evm.balance saying 'no rpc'")
+		evmOff    = fs.Bool("no-evm", false, "disable the wallet.evm.* methods entirely (no secp256k1 key created)")
 		showVer   = fs.Bool("version", false, "print version and exit")
 	)
 	fs.SetOutput(os.Stderr)
@@ -104,7 +109,40 @@ func run(ctx context.Context, args []string) error {
 		}
 	}()
 
-	w := wallet.New(wallet.Address(*addr), signer, store)
+	// EVM side. Created when --no-evm is NOT passed AND the secp256k1
+	// keyfile can be loaded or freshly generated. RPC is optional —
+	// without it the wallet still signs EIP-3009 authorizations, but
+	// wallet.evm.balance reports "no RPC configured" instead of a
+	// live on-chain read.
+	//
+	// Disabling EVM is supported (--no-evm) so dev / test runs that
+	// don't need on-chain methods don't pay the cost of generating a
+	// secp256k1 keypair on first start.
+	var w *wallet.Wallet
+	if *evmOff {
+		w = wallet.New(wallet.Address(*addr), signer, store)
+	} else {
+		evmSigner, err := evm.LoadOrCreateEVMSigner(*evmIDPath)
+		if err != nil {
+			return fmt.Errorf("evm identity: %w", err)
+		}
+		// --evm-rpc beats env so an operator can override per-app.
+		rpc := *evmRPC
+		if rpc == "" {
+			rpc = os.Getenv("PILOT_EVM_RPC")
+		}
+		cfg := wallet.EVMConfig{
+			Signer:      evmSigner,
+			ChainID:     *evmChain,
+			RPCEndpoint: rpc,
+		}
+		w, err = wallet.NewWithEVM(wallet.Address(*addr), signer, store, cfg)
+		if err != nil {
+			return fmt.Errorf("evm wallet: %w", err)
+		}
+		logger.Printf("evm: addr=%s chain=%d token=%s rpc=%v",
+			w.EVMAddress().Hex(), *evmChain, w.EVMToken().Hex(), rpc != "")
+	}
 	defer w.Close()
 
 	// Arm spend-cap persistence BEFORE configuring caps, so any
@@ -141,6 +179,7 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	dispatcher := walletipc.NewDispatcher(w)
+	walletipc.RegisterEVM(dispatcher, w)
 
 	// If a stale socket exists from a previous crash, drop it. unix sockets
 	// can't be re-bound while the inode still exists.
