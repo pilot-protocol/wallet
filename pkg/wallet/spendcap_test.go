@@ -319,3 +319,211 @@ func TestSpendCapNoneConfigured(t *testing.T) {
 		}
 	}
 }
+
+// testHMACKey returns a deterministic 32-byte key for cap-state tests.
+func testHMACKey() []byte {
+	k := make([]byte, 32)
+	for i := range k {
+		k[i] = byte(i + 7)
+	}
+	return k
+}
+
+// TestCapStateMalformedLineNotSilentlyDropped is the core fail-closed
+// property: a garbage line in the cap-state file must NOT be silently
+// skipped (the old behavior, which let an attacker erase a real spend
+// by overwriting it with junk). Load must error so the wallet refuses
+// to run against a corrupted/tampered log rather than under-counting.
+func TestCapStateMalformedLineNotSilentlyDropped(t *testing.T) {
+	t.Parallel()
+	for _, key := range [][]byte{nil, testHMACKey()} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "cap-state.jsonl")
+		content := `{"at":"2026-05-27T10:00:00Z","asset":"USDC","amount":5}
+not-json garbage line
+{"at":"2026-05-27T10:05:00Z","asset":"USDC","amount":7}
+`
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		recs, _, _, err := loadSpendRecords(path, key)
+		if err == nil {
+			t.Fatalf("key=%v: malformed line was silently accepted (got %d records, want error)", key != nil, len(recs))
+		}
+		if !strings.Contains(err.Error(), "malformed") {
+			t.Errorf("key=%v: err %q should mention malformed", key != nil, err.Error())
+		}
+	}
+}
+
+// TestCapStateTamperedRecordDetected confirms that altering an
+// authenticated record's amount (without recomputing its HMAC) is
+// caught at load and fails closed.
+func TestCapStateTamperedRecordDetected(t *testing.T) {
+	t.Parallel()
+	key := testHMACKey()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cap-state.jsonl")
+
+	// Write two authenticated records via the append path.
+	r1 := spendRecord{at: mustTime("2026-05-27T10:00:00Z"), asset: "USDC", amount: 5}
+	r2 := spendRecord{at: mustTime("2026-05-27T10:05:00Z"), asset: "USDC", amount: 7}
+	tip, err := appendSpendRecord(path, r1, key, nil)
+	if err != nil {
+		t.Fatalf("append r1: %v", err)
+	}
+	if _, err := appendSpendRecord(path, r2, key, tip); err != nil {
+		t.Fatalf("append r2: %v", err)
+	}
+
+	// Clean chain loads fine.
+	if _, _, _, err := loadSpendRecords(path, key); err != nil {
+		t.Fatalf("clean chain should load: %v", err)
+	}
+
+	// Tamper: bump the first record's amount but keep its old HMAC.
+	raw, _ := os.ReadFile(path)
+	tampered := strings.Replace(string(raw), `"amount":5`, `"amount":9999`, 1)
+	if tampered == string(raw) {
+		t.Fatal("tamper substitution did not apply")
+	}
+	if err := os.WriteFile(path, []byte(tampered), 0o600); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	_, _, _, err = loadSpendRecords(path, key)
+	if err == nil {
+		t.Fatal("tampered record loaded without error — integrity check missing")
+	}
+	if !strings.Contains(err.Error(), "HMAC mismatch") {
+		t.Errorf("err %q should mention HMAC mismatch", err.Error())
+	}
+
+	// A truncated chain (deleting the tail record) must also be caught
+	// only if it breaks the chain; deleting the LAST record alone is
+	// not detectable by a forward chain, but deleting/altering an
+	// EARLIER record is — verify the mixed/append-plain tamper too.
+	if err := os.WriteFile(path, append([]byte(nil), raw...), 0o600); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	// Append an UNauthenticated record to a signed chain (attacker drops
+	// in a plain record). The mixed-format guard must refuse.
+	f, _ := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+	_, _ = f.WriteString(`{"at":"2026-05-27T10:10:00Z","asset":"USDC","amount":1}` + "\n")
+	_ = f.Close()
+	if _, _, _, err := loadSpendRecords(path, key); err == nil {
+		t.Fatal("signed chain + appended plain record loaded — mixed-format tamper not caught")
+	}
+}
+
+// TestCapStateHMACRoundTrip confirms an authenticated chain written by
+// the wallet survives a restart and the cap still holds — the secure
+// analogue of TestSpendCapsPersistAcrossRestart.
+func TestCapStateHMACRoundTrip(t *testing.T) {
+	t.Parallel()
+	key := testHMACKey()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cap-state.jsonl")
+	now := time.Date(2026, 5, 21, 12, 0, 0, 0, time.UTC)
+
+	{
+		s, _ := NewLocalSigner()
+		bob := NewInMemory(addrBob, s)
+		alice := NewInMemory(addrAlice, s)
+		bob.clock = func() time.Time { return now }
+		alice.clock = func() time.Time { return now }
+		if err := bob.UseCapStateFileWithHMAC(path, key); err != nil {
+			t.Fatalf("UseCapStateFileWithHMAC: %v", err)
+		}
+		bob.SetSpendCaps(SpendCap{Asset: "USDC", Limit: 100, Window: 24 * time.Hour})
+		bob.Topup("USDC", 1000, "dev")
+		ch, _ := alice.Request(60, "USDC", time.Hour, "first")
+		if _, err := bob.Pay(ch); err != nil {
+			t.Fatalf("first pay: %v", err)
+		}
+		bob.Close()
+		alice.Close()
+	}
+
+	// On-disk record must carry an HMAC field.
+	raw, _ := os.ReadFile(path)
+	if !strings.Contains(string(raw), `"hmac":`) {
+		t.Fatalf("persisted record missing hmac field: %q", raw)
+	}
+
+	// Restart with the same key: prior spend survives + cap holds.
+	s, _ := NewLocalSigner()
+	bob := NewInMemory(addrBob, s)
+	defer bob.Close()
+	alice := NewInMemory(addrAlice, s)
+	defer alice.Close()
+	bob.clock = func() time.Time { return now.Add(time.Minute) }
+	alice.clock = func() time.Time { return now.Add(time.Minute) }
+	if err := bob.UseCapStateFileWithHMAC(path, key); err != nil {
+		t.Fatalf("restart load: %v", err)
+	}
+	bob.SetSpendCaps(SpendCap{Asset: "USDC", Limit: 100, Window: 24 * time.Hour})
+	bob.Topup("USDC", 1000, "dev")
+	if got := bob.SpentInWindow("USDC", 24*time.Hour); got != 60 {
+		t.Errorf("post-restart SpentInWindow = %d, want 60", got)
+	}
+	ch, _ := alice.Request(50, "USDC", time.Hour, "would-exceed")
+	if _, err := bob.Pay(ch); !errors.Is(err, ErrSpendCapExceeded) {
+		t.Errorf("post-restart 50-pay err %v, want ErrSpendCapExceeded", err)
+	}
+}
+
+// TestCapStateLegacyMigration confirms a legacy (HMAC-less) file is
+// migrated to an authenticated chain on first load with a key, after
+// which a tamper is detectable.
+func TestCapStateLegacyMigration(t *testing.T) {
+	t.Parallel()
+	key := testHMACKey()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cap-state.jsonl")
+	legacy := `{"at":"2026-05-27T10:00:00Z","asset":"USDC","amount":5}
+{"at":"2026-05-27T10:05:00Z","asset":"USDC","amount":7}
+`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy: %v", err)
+	}
+
+	recs, _, migrated, err := loadSpendRecords(path, key)
+	if err != nil {
+		t.Fatalf("load legacy: %v", err)
+	}
+	if !migrated {
+		t.Fatal("all-legacy file should report migrated=true")
+	}
+	if len(recs) != 2 {
+		t.Fatalf("got %d records, want 2", len(recs))
+	}
+
+	// Perform the migration as the wallet would, then verify the file
+	// is now authenticated and tamper-evident.
+	if _, err := rewriteSpendRecords(path, recs, key); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	raw, _ := os.ReadFile(path)
+	if !strings.Contains(string(raw), `"hmac":`) {
+		t.Fatalf("migrated file missing hmac: %q", raw)
+	}
+	// Re-load: now authenticated, no migration, clean.
+	if _, _, m2, err := loadSpendRecords(path, key); err != nil || m2 {
+		t.Fatalf("post-migration load err=%v migrated=%v", err, m2)
+	}
+	// Tamper now → caught.
+	tampered := strings.Replace(string(raw), `"amount":5`, `"amount":1`, 1)
+	os.WriteFile(path, []byte(tampered), 0o600)
+	if _, _, _, err := loadSpendRecords(path, key); err == nil {
+		t.Fatal("tamper after migration not detected")
+	}
+}
+
+func mustTime(s string) time.Time {
+	tm, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		panic(err)
+	}
+	return tm
+}

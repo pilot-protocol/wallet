@@ -2,7 +2,9 @@ package wallet
 
 import (
 	"crypto/ed25519"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -46,6 +48,35 @@ func (s *LocalSigner) PublicKey() []byte { return append([]byte(nil), s.pub...) 
 // Sign returns the 64-byte Ed25519 signature over msg.
 func (s *LocalSigner) Sign(msg []byte) ([]byte, error) {
 	return ed25519.Sign(s.priv, msg), nil
+}
+
+// DeriveCapStateHMACKey derives a 32-byte HMAC-SHA256 key from the
+// signer's Ed25519 private key using HKDF with info="pilot-cap-state-v1".
+// The key authenticates the wallet's cap-state spend log so the same OS
+// user can't tamper with or erase it to bypass spend caps. Returns nil
+// if the private key is empty.
+//
+// Keep info in sync with the reader (pilotctl appstore caps): both must
+// derive the identical key from the same identity, since the daemon
+// reads what the wallet writes.
+func (s *LocalSigner) DeriveCapStateHMACKey() []byte {
+	return deriveCapStateHMACKey(s.priv)
+}
+
+// deriveCapStateHMACKey is the HKDF body shared by DeriveCapStateHMACKey.
+func deriveCapStateHMACKey(priv ed25519.PrivateKey) []byte {
+	if len(priv) == 0 {
+		return nil
+	}
+	// HKDF-Extract: PRK = HMAC-SHA256(salt=nil, IKM=privateKey)
+	mac := hmac.New(sha256.New, nil)
+	mac.Write(priv)
+	prk := mac.Sum(nil)
+	// HKDF-Expand: OKM = HMAC-SHA256(PRK, info || 0x01)
+	mac = hmac.New(sha256.New, prk)
+	mac.Write([]byte("pilot-cap-state-v1"))
+	mac.Write([]byte{0x01})
+	return mac.Sum(nil)
 }
 
 // identityFile is the on-disk shape of a persisted signer. The seed

@@ -2,6 +2,9 @@ package wallet
 
 import (
 	"bufio"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -154,7 +157,8 @@ func (w *Wallet) recordSpendLocked(asset Asset, amount Amount) {
 	}
 	w.spendLog = append(w.spendLog, r)
 	if w.capStateFile != "" {
-		if err := appendSpendRecord(w.capStateFile, r); err != nil {
+		newTip, err := appendSpendRecord(w.capStateFile, r, w.capStateHMACKey, w.capStateLastHMAC)
+		if err != nil {
 			// Persistence failure is non-fatal for the in-memory cap
 			// check (which has already passed and the spend already
 			// recorded in the ledger), but the operator should know:
@@ -163,6 +167,10 @@ func (w *Wallet) recordSpendLocked(asset Asset, amount Amount) {
 			// best-effort behavior — production callers can also
 			// wrap recordSpendLocked with their own observability.
 			_ = err // intentionally swallow: spend succeeded, persistence is advisory
+		} else {
+			// Advance the chain tip only on a durable append, so the
+			// next record links to what actually landed on disk.
+			w.capStateLastHMAC = newTip
 		}
 	}
 	w.pruneSpendLogLocked()
@@ -174,37 +182,92 @@ func (w *Wallet) recordSpendLocked(asset Asset, amount Amount) {
 // fields so it can't be json.Marshal'd directly — this wrapper is the
 // stable wire/disk form. Field names are short to keep the JSONL file
 // compact for high-throughput wallets.
+//
+// HMAC is an optional base64 HMAC-SHA256 over the canonical (HMAC-less)
+// record bytes, chained with the prior record's HMAC. Empty means the
+// record predates integrity protection (legacy file). The chain ties
+// every record to its predecessor so a tamper, reorder, truncate, or
+// deletion is detectable: changing or dropping one record invalidates
+// every record after it.
 type jsonSpendRecord struct {
 	At     time.Time `json:"at"`
 	Asset  Asset     `json:"asset"`
 	Amount Amount    `json:"amount"`
+	HMAC   string    `json:"hmac,omitempty"`
+}
+
+// recordHMAC computes the chained HMAC for one record: HMAC-SHA256 over
+// the canonical (HMAC-less) JSON of the record, with the prior record's
+// HMAC mixed in. The canonical form is the same struct with HMAC="" so
+// the MAC never covers itself. Returns the raw MAC bytes; callers
+// base64-encode for the on-disk field.
+func recordHMAC(key, prev []byte, r jsonSpendRecord) []byte {
+	r.HMAC = ""
+	canonical, _ := json.Marshal(r)
+	mac := hmac.New(sha256.New, key)
+	mac.Write(canonical)
+	mac.Write(prev)
+	return mac.Sum(nil)
 }
 
 // UseCapStateFile points the wallet at a JSONL file where every
-// successful spend gets appended (one line per record) and from
-// which any pre-existing records are replayed into the in-memory
-// spend log. Call BEFORE handling traffic so the cap check sees
-// historical spends. Same threat model as the identity file: 0600
-// owner-only.
+// successful spend gets appended, replaying pre-existing records into
+// the in-memory spend log. This is the legacy (unauthenticated) format:
+// records carry no HMAC. It still fails closed on a malformed line —
+// a garbage/truncated entry is treated as corruption or tampering, not
+// silently dropped — so a partial bypass attempt can't pass unnoticed.
 //
-// JSONL was chosen over a single-blob snapshot because appends are
-// cheaper than rewrites and a partial-write only loses the trailing
-// line. The file is opened fresh for each append (closed promptly)
-// — a small perf cost in exchange for no fd leaks on long-running
-// wallets that haven't seen traffic for a while.
+// For tamper-resistant persistence, use UseCapStateFileWithHMAC: the
+// same OS user can still write to the file, but can't alter or erase
+// spend history without breaking the per-record HMAC chain.
+//
+// Call BEFORE handling traffic so the cap check sees historical spends.
+// Same threat model as the identity file: 0600 owner-only.
 func (w *Wallet) UseCapStateFile(path string) error {
+	return w.UseCapStateFileWithHMAC(path, nil)
+}
+
+// UseCapStateFileWithHMAC is UseCapStateFile with integrity protection.
+// hmacKey keys a chained HMAC-SHA256 over each record so the spend log
+// can't be tampered with or truncated by the same OS user without
+// detection. A nil key selects the legacy unauthenticated format.
+//
+// Load behaviour (key set):
+//   - every record must carry a valid HMAC that links to its
+//     predecessor; any mismatch, missing-HMAC-mid-chain, or malformed
+//     line is a tamper signal and fails closed (refuse to load → the
+//     caller refuses to spend rather than spending against a forged
+//     history);
+//   - an all-legacy file (records present, none with an HMAC) is
+//     migrated once: it's loaded and rewritten with a fresh HMAC chain.
+//     A mixed file (some authenticated records plus an unauthenticated
+//     one) is rejected — that shape only arises from tampering.
+func (w *Wallet) UseCapStateFileWithHMAC(path string, hmacKey []byte) error {
 	if path == "" {
 		return fmt.Errorf("UseCapStateFile: path required")
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("UseCapStateFile: mkdir %s: %w", filepath.Dir(path), err)
 	}
-	records, err := loadSpendRecords(path)
+	records, tip, migrated, err := loadSpendRecords(path, hmacKey)
 	if err != nil {
 		return fmt.Errorf("UseCapStateFile: load %s: %w", path, err)
 	}
+	// Legacy → authenticated migration: rewrite the whole file as a
+	// fresh HMAC chain so subsequent appends extend an authenticated
+	// log. Done before we publish capStateFile so a crash mid-migration
+	// leaves the original readable.
+	if migrated {
+		newTip, err := rewriteSpendRecords(path, records, hmacKey)
+		if err != nil {
+			return fmt.Errorf("UseCapStateFile: migrate %s: %w", path, err)
+		}
+		tip = newTip
+	}
 	w.capMu.Lock()
 	w.capStateFile = path
+	w.capStateHMACKey = hmacKey
+	w.capStateLastHMAC = tip
 	w.spendLog = append(w.spendLog, records...)
 	w.pruneSpendLogLocked()
 	w.capMu.Unlock()
@@ -212,67 +275,161 @@ func (w *Wallet) UseCapStateFile(path string) error {
 }
 
 // loadSpendRecords reads a JSONL spend log. Returns an empty slice
-// (nil error) if the file doesn't exist — first-run is normal.
-// Malformed lines are skipped with the parse error swallowed so a
-// single corrupt entry doesn't refuse to load the wallet.
-func loadSpendRecords(path string) ([]spendRecord, error) {
+// (nil error, nil tip) if the file doesn't exist — first-run is normal.
+//
+// Fail-closed: a malformed line is never silently skipped. Without a
+// key it's reported as corruption; with a key it's a tamper signal.
+// The returned tip is the last record's raw HMAC (nil for a legacy
+// file). migrated is true when the file is all-legacy but a key was
+// supplied, signalling the caller to rewrite it as an authenticated
+// chain.
+func loadSpendRecords(path string, hmacKey []byte) (recs []spendRecord, tip []byte, migrated bool, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, nil, false, nil
 		}
-		return nil, err
+		return nil, nil, false, err
 	}
 	defer f.Close()
 	// Refuse a world-readable spend log — same threat model as the
 	// identity file (the spend history leaks payment patterns).
 	if info, err := f.Stat(); err == nil {
 		if perm := info.Mode().Perm(); perm&0o077 != 0 {
-			return nil, fmt.Errorf("cap-state %s: permissions %#o expose spend history; chmod 0600", path, perm)
+			return nil, nil, false, fmt.Errorf("cap-state %s: permissions %#o expose spend history; chmod 0600", path, perm)
 		}
 	}
 	var out []spendRecord
+	var prev []byte
+	sawHMAC, sawPlain := false, false
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 4*1024), 1024*1024)
+	lineNo := 0
 	for scanner.Scan() {
+		lineNo++
 		raw := scanner.Bytes()
 		if len(raw) == 0 {
 			continue
 		}
 		var j jsonSpendRecord
 		if err := json.Unmarshal(raw, &j); err != nil {
-			// Skip malformed lines — a single bad write shouldn't
-			// brick the whole log.
-			continue
+			// Fail closed: a corrupt/garbage line is never dropped.
+			return nil, nil, false, fmt.Errorf("malformed cap-state line %d: %w", lineNo, err)
+		}
+		if j.HMAC != "" {
+			sawHMAC = true
+		} else {
+			sawPlain = true
+		}
+		if hmacKey != nil && j.HMAC != "" {
+			want := recordHMAC(hmacKey, prev, j)
+			got, decErr := base64.StdEncoding.DecodeString(j.HMAC)
+			if decErr != nil || !hmac.Equal(want, got) {
+				return nil, nil, false, fmt.Errorf("cap-state line %d: HMAC mismatch — spend log tampered with or truncated", lineNo)
+			}
+			prev = got
 		}
 		out = append(out, spendRecord{at: j.At, asset: j.Asset, amount: j.Amount})
 	}
 	if err := scanner.Err(); err != nil {
-		return out, err
+		return nil, nil, false, err
 	}
-	return out, nil
+	if hmacKey != nil {
+		switch {
+		case sawHMAC && sawPlain:
+			// A file that mixes authenticated and unauthenticated
+			// records can only arise from tampering (e.g. an attacker
+			// appended a plain record to a signed chain). Refuse.
+			return nil, nil, false, fmt.Errorf("cap-state %s mixes authenticated and unauthenticated records — refusing (possible tampering)", path)
+		case sawPlain && !sawHMAC:
+			// All-legacy file: migrate it to an authenticated chain.
+			return out, nil, true, nil
+		}
+	}
+	return out, prev, false, nil
+}
+
+// rewriteSpendRecords atomically replaces the cap-state file with an
+// authenticated HMAC chain over recs. Used by the legacy→authenticated
+// migration. Writes to a temp file in the same dir then renames, so a
+// crash never leaves a half-written log. Returns the new chain tip.
+func rewriteSpendRecords(path string, recs []spendRecord, hmacKey []byte) ([]byte, error) {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".cap-state-*.tmp")
+	if err != nil {
+		return nil, err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op after a successful rename
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return nil, err
+	}
+	var prev []byte
+	w := bufio.NewWriter(tmp)
+	for _, r := range recs {
+		j := jsonSpendRecord{At: r.at, Asset: r.asset, Amount: r.amount}
+		mac := recordHMAC(hmacKey, prev, j)
+		j.HMAC = base64.StdEncoding.EncodeToString(mac)
+		body, err := json.Marshal(j)
+		if err != nil {
+			_ = tmp.Close()
+			return nil, err
+		}
+		if _, err := w.Write(append(body, '\n')); err != nil {
+			_ = tmp.Close()
+			return nil, err
+		}
+		prev = mac
+	}
+	if err := w.Flush(); err != nil {
+		_ = tmp.Close()
+		return nil, err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return nil, err
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return nil, err
+	}
+	return prev, nil
 }
 
 // appendSpendRecord writes one JSONL line atomically (O_APPEND on
 // POSIX is sufficient for small writes < PIPE_BUF on the same fd;
 // we close immediately to avoid fd accumulation on long-running
 // wallets that haven't paid for a while). 0600 perm matches the
-// identity file's threat model.
-func appendSpendRecord(path string, r spendRecord) error {
-	body, err := json.Marshal(jsonSpendRecord{At: r.at, Asset: r.asset, Amount: r.amount})
+// identity file's threat model. When hmacKey is non-nil the record
+// carries a chained HMAC linking it to prevHMAC; the new chain tip is
+// returned so the caller can extend the chain on the next append.
+func appendSpendRecord(path string, r spendRecord, hmacKey, prevHMAC []byte) ([]byte, error) {
+	j := jsonSpendRecord{At: r.at, Asset: r.asset, Amount: r.amount}
+	var tip []byte
+	if hmacKey != nil {
+		tip = recordHMAC(hmacKey, prevHMAC, j)
+		j.HMAC = base64.StdEncoding.EncodeToString(tip)
+	}
+	body, err := json.Marshal(j)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	body = append(body, '\n')
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer f.Close()
 	if _, err := f.Write(body); err != nil {
-		return err
+		return nil, err
 	}
-	return f.Sync()
+	if err := f.Sync(); err != nil {
+		return nil, err
+	}
+	return tip, nil
 }
 
 // capMu, caps, and spendLog live on Wallet but are declared here so
