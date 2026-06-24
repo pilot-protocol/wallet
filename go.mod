@@ -1,6 +1,6 @@
 module github.com/pilot-protocol/wallet
 
-go 1.25.10
+go 1.25.11
 
 require (
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
