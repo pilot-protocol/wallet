@@ -1,12 +1,14 @@
 module github.com/pilot-protocol/wallet
 
-go 1.25.0
+go 1.25.11
 
 require (
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
 	golang.org/x/crypto v0.53.0
 	modernc.org/sqlite v1.53.0
 )
+
+require golang.org/x/sync v0.21.0 // indirect
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
