@@ -160,10 +160,10 @@ func TestShippedManifestSpendCapsParse(t *testing.T) {
 	raw, _ := os.ReadFile(manifestPath(t))
 	m, _ := manifest.Parse(raw)
 	caps := wallet.ParseSpendCapsFromManifest(m.Grants)
-	if len(caps) != 2 {
-		t.Fatalf("parsed %d caps from shipped manifest, want 2 (x402-auth + evm-eip3009)", len(caps))
+	if len(caps) != 3 {
+		t.Fatalf("parsed %d caps from shipped manifest, want 3 (x402-auth + evm-eip3009 + settler-transfer)", len(caps))
 	}
-	// Both caps target USDC, both window=24h, both limit=100 (per manifest.json).
+	// All caps target USDC, window=24h, limit=100 (per manifest.json).
 	for i, c := range caps {
 		if c.Asset != "USDC" {
 			t.Errorf("caps[%d].Asset = %q, want USDC", i, c.Asset)
@@ -175,14 +175,14 @@ func TestShippedManifestSpendCapsParse(t *testing.T) {
 			t.Errorf("caps[%d].Limit = %d, want 100", i, c.Limit)
 		}
 	}
-	// The two grants target different sign-purposes; without the
+	// The grants target different sign-purposes; without the
 	// Target field carried through, multi-target manifests render as
 	// indistinguishable duplicates in any introspection UI.
 	targets := map[string]bool{}
 	for _, c := range caps {
 		targets[c.Target] = true
 	}
-	for _, want := range []string{"x402-auth", "evm-eip3009"} {
+	for _, want := range []string{"x402-auth", "evm-eip3009", "settler-transfer"} {
 		if !targets[want] {
 			t.Errorf("shipped manifest's caps missing target=%q (got targets=%v)", want, targets)
 		}
