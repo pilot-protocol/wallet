@@ -94,10 +94,17 @@ type Wallet struct {
 	// one mutex. capMu guards both `caps` and `spendLog`. Both are
 	// zero-value-correct (no caps, empty log) so existing callers
 	// of New() get the no-cap behavior preserved.
-	capMu         sync.Mutex
-	caps          []SpendCap
-	spendLog      []spendRecord
-	capStateFile  string // when set, recordSpendLocked also appends a JSONL line here so caps survive wallet restart
+	capMu        sync.Mutex
+	caps         []SpendCap
+	spendLog     []spendRecord
+	capStateFile string // when set, recordSpendLocked also appends a JSONL line here so caps survive wallet restart
+	// capStateHMACKey, when non-nil, keys a per-record HMAC chain over
+	// the cap-state file so the same OS user can't tamper with or erase
+	// spend history to bypass caps. nil keeps the legacy (unauthenticated)
+	// on-disk format. capStateLastHMAC carries the running chain tip so
+	// each append links to the prior record. Both guarded by capMu.
+	capStateHMACKey  []byte
+	capStateLastHMAC []byte
 }
 
 // New returns a wallet bound to a pilot address, a signer, and a Store.

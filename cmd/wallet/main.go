@@ -176,10 +176,20 @@ func run(ctx context.Context, args []string) error {
 	// post-startup Pay. Without this, a daemon restart silently
 	// resets the cap counter — a hard bypass.
 	if *capState != "" {
-		if err := w.UseCapStateFile(*capState); err != nil {
+		// Derive a cap-state HMAC key from the wallet identity so the
+		// spend log is tamper-evident: the same OS user can't erase or
+		// alter spend history to bypass caps without breaking the chain.
+		// Falls back to the legacy unauthenticated format only if the
+		// signer can't yield a key (non-LocalSigner runtime signers).
+		hmacKey := signer.DeriveCapStateHMACKey()
+		if err := w.UseCapStateFileWithHMAC(*capState, hmacKey); err != nil {
 			return fmt.Errorf("cap-state: %w", err)
 		}
-		logger.Printf("cap-state: persisting to %s", *capState)
+		if hmacKey != nil {
+			logger.Printf("cap-state: persisting to %s (HMAC-authenticated)", *capState)
+		} else {
+			logger.Printf("cap-state: persisting to %s (legacy unauthenticated; no identity key)", *capState)
+		}
 	}
 
 	// Activate manifest-declared spend caps. The supervisor lays the
