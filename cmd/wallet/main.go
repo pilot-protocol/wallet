@@ -19,6 +19,8 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -36,6 +38,7 @@ import (
 	"github.com/pilot-protocol/app-store/pkg/ipc"
 	"github.com/pilot-protocol/app-store/pkg/manifest"
 	"github.com/pilot-protocol/wallet/pkg/evm"
+	"github.com/pilot-protocol/wallet/pkg/settlerclient"
 	"github.com/pilot-protocol/wallet/pkg/wallet"
 	"github.com/pilot-protocol/wallet/pkg/walletipc"
 )
@@ -48,7 +51,7 @@ const shutdownGrace = 5 * time.Second
 // Version is the wallet binary's release tag. Kept in sync with the
 // app_version field in manifest.json — `manifest_test.go` cross-checks
 // they agree, so a release without bumping both fails CI.
-const Version = "0.3.3"
+const Version = "0.4.0"
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -75,6 +78,8 @@ func run(ctx context.Context, args []string) error {
 		evmChains  = fs.String("evm-chains", "8453,1,137", "comma-separated EVM chain IDs to enable. First is primary (used when wallet.evm.* requests omit chain_id). Known: 1=Ethereum, 8453=Base, 137=Polygon, 84532=Base Sepolia. $PILOT_EVM_CHAINS overrides this when --evm-chains was left at the default.")
 		evmRPC     = fs.String("evm-rpc", "", "PRIMARY chain's JSON-RPC endpoint. For per-chain endpoints use PILOT_EVM_RPC_<CHAINID> env vars (e.g. PILOT_EVM_RPC_137=https://polygon-rpc.com). Falls back to $PILOT_EVM_RPC for the primary chain.")
 		evmOff     = fs.Bool("no-evm", false, "disable every wallet.evm.* method (no secp256k1 key created)")
+		settlerAddr      = fs.String("settler-addr", "", "TCP endpoint of the pilot-protocol/settler service (host:port). Empty disables wallet.settler.* methods. Env: PILOT_SETTLER_ADDR.")
+		settlerPubkeyHex = fs.String("settler-pubkey", "", "expected settler ed25519 pubkey (hex) — when set, the wallet refuses to start if the live settler advertises a different pubkey. Env: PILOT_SETTLER_PUBKEY.")
 		showVer   = fs.Bool("version", false, "print version and exit")
 	)
 	fs.SetOutput(os.Stderr)
@@ -198,8 +203,45 @@ func run(ctx context.Context, args []string) error {
 		logger.Printf("spend caps: %d active from %s", len(caps), *mfPath)
 	}
 
+	// Settler client. Configured via --settler-addr (or env
+	// PILOT_SETTLER_ADDR) with an optional trust anchor pubkey
+	// (--settler-pubkey / PILOT_SETTLER_PUBKEY). When the trust
+	// anchor is set, the wallet asks the settler for its identity at
+	// startup and refuses to run on a mismatch — catches a
+	// misconfigured or impersonating settler before any signed
+	// payload reaches it.
+	settlerEP := *settlerAddr
+	if settlerEP == "" {
+		settlerEP = os.Getenv("PILOT_SETTLER_ADDR")
+	}
+	if settlerEP != "" {
+		anchorHex := *settlerPubkeyHex
+		if anchorHex == "" {
+			anchorHex = os.Getenv("PILOT_SETTLER_PUBKEY")
+		}
+		var anchor ed25519.PublicKey
+		if anchorHex != "" {
+			anchorBytes, err := hex.DecodeString(anchorHex)
+			if err != nil {
+				return fmt.Errorf("settler-pubkey hex: %w", err)
+			}
+			if len(anchorBytes) != ed25519.PublicKeySize {
+				return fmt.Errorf("settler-pubkey length %d != %d", len(anchorBytes), ed25519.PublicKeySize)
+			}
+			anchor = ed25519.PublicKey(anchorBytes)
+		}
+		client := settlerclient.New(settlerEP, anchor)
+		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		if err := client.VerifyIdentity(probeCtx); err != nil {
+			cancel()
+			return fmt.Errorf("settler trust-anchor check failed: %w", err)
+		}
+		cancel()
+		w.SetSettler(client)
+		logger.Printf("settler: endpoint=%s anchor=%v", settlerEP, anchor != nil)
+	}
+
 	dispatcher := walletipc.NewDispatcher(w)
-	walletipc.RegisterEVM(dispatcher, w)
 
 	// If a stale socket exists from a previous crash, drop it. unix sockets
 	// can't be re-bound while the inode still exists.

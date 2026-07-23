@@ -11,6 +11,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/pilot-protocol/wallet/pkg/settlerclient"
 )
 
 // ErrInsufficientBalance is returned when a Pay would drive the balance below zero.
@@ -79,6 +81,13 @@ type Wallet struct {
 	// EVM support is configured. Built once at construction in
 	// NewWithEVMs and read-only after that, so no mutex needed.
 	evmByChain map[uint64]*evmBinding
+
+	// settler is the (optional) client for the canonical credit-
+	// ledger service. nil = wallet runs in local-only mode (the
+	// existing internal sqlite ledger is authoritative for "balance"
+	// / "pay" / "settle"). When set, wallet.settler.* IPC methods
+	// route their queries + signed transfers through this client.
+	settler *settlerclient.Client
 
 	// Spend cap state — declared in spendcap.go, fields here for
 	// embedding so the cap check + recordSpend can stay atomic via

@@ -32,6 +32,14 @@ const (
 	MethodEVMSatisfy = "wallet.evm.satisfy"
 	MethodEVMVerify  = "wallet.evm.verify"
 	MethodEVMChains  = "wallet.evm.chains"
+
+	// Settler surface — only registered when the wallet was wired
+	// with a settler client at startup. Routes IPC calls through
+	// pkg/settlerclient against the configured TCP endpoint.
+	MethodSettlerIdentity = "wallet.settler.identity"
+	MethodSettlerBalance  = "wallet.settler.balance"
+	MethodSettlerHistory  = "wallet.settler.history"
+	MethodSettlerTransfer = "wallet.settler.transfer"
 )
 
 // AllMethods is the canonical set the dispatcher registers. Used by
@@ -47,6 +55,14 @@ var AllMethods = []string{
 // when applicable).
 var AllEVMMethods = []string{
 	MethodEVMAddress, MethodEVMBalance, MethodEVMSatisfy, MethodEVMVerify, MethodEVMChains,
+}
+
+// AllSettlerMethods is the wallet-side settler surface. Like AllEVMMethods,
+// these are registered conditionally — a wallet started without a
+// settler endpoint omits them so callers get "method not found"
+// rather than a misleading wire-error from a half-configured client.
+var AllSettlerMethods = []string{
+	MethodSettlerIdentity, MethodSettlerBalance, MethodSettlerHistory, MethodSettlerTransfer,
 }
 
 // ── balance ──────────────────────────────────────────────────────────────
@@ -230,4 +246,62 @@ type ChainConfig struct {
 	ChainID    uint64 `json:"chain_id"`
 	Token      string `json:"token"`
 	RPCEnabled bool   `json:"rpc_enabled"`
+}
+
+// ── settler ──────────────────────────────────────────────────────────────
+//
+// IPC request/response types for wallet.settler.*. The wallet's own
+// pubkey is implicit: every method operates against the wallet's
+// signer, so callers never specify "account" — the wallet uses its
+// own.
+
+type SettlerIdentityReq struct{}
+
+type SettlerIdentityResp struct {
+	Endpoint       string `json:"endpoint"`
+	SettlerPubkey  string `json:"settler_pubkey"`
+	HasOperator    bool   `json:"has_operator"`
+	OperatorPubkey string `json:"operator_pubkey,omitempty"`
+}
+
+type SettlerBalanceReq struct {
+	Asset string `json:"asset"`
+}
+
+type SettlerBalanceResp struct {
+	Account string `json:"account"` // wallet's own ed25519 pubkey, hex
+	Asset   string `json:"asset"`
+	Amount  uint64 `json:"amount"`
+}
+
+type SettlerHistoryReq struct {
+	Limit int `json:"limit,omitempty"`
+}
+
+type SettlerHistoryResp struct {
+	Transactions []SettlerTransaction `json:"transactions"`
+}
+
+type SettlerTransaction struct {
+	ID         string `json:"id"`
+	Kind       string `json:"kind"`
+	Asset      string `json:"asset"`
+	Amount     uint64 `json:"amount"`
+	From       string `json:"from,omitempty"`
+	To         string `json:"to"`
+	Nonce      string `json:"nonce,omitempty"`
+	Timestamp  string `json:"timestamp"` // RFC3339
+	OperatorOK bool   `json:"operator_ok,omitempty"`
+}
+
+type SettlerTransferReq struct {
+	To               string `json:"to"`                // hex ed25519 pubkey
+	Asset            string `json:"asset"`             // e.g. "USDC"
+	Amount           uint64 `json:"amount"`            // smallest unit
+	Memo             string `json:"memo,omitempty"`
+	ExpiresInSeconds int64  `json:"expires_in_seconds,omitempty"` // 0 → 5 min default
+}
+
+type SettlerTransferResp struct {
+	Transaction SettlerTransaction `json:"transaction"`
 }
