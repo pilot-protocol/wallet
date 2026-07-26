@@ -105,6 +105,14 @@ type Wallet struct {
 	// each append links to the prior record. Both guarded by capMu.
 	capStateHMACKey  []byte
 	capStateLastHMAC []byte
+	// capReservations holds spends that have passed the cap check but
+	// whose outcome is not yet known — the remote call is still in
+	// flight. They count toward spentInWindowLocked so a concurrent
+	// caller cannot be granted budget an in-flight spend has already
+	// claimed. capReservationSeq issues the handles. Both guarded by
+	// capMu.
+	capReservations   map[uint64]spendRecord
+	capReservationSeq uint64
 }
 
 // New returns a wallet bound to a pilot address, a signer, and a Store.

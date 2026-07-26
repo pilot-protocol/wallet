@@ -85,6 +85,8 @@ func (w *Wallet) SpentInWindow(asset Asset, window time.Duration) Amount {
 }
 
 // spentInWindowLocked is the internal accumulator; w.capMu must be held.
+// In-flight reservations count alongside settled records so budget that
+// has been handed out but not yet confirmed can't be handed out twice.
 func (w *Wallet) spentInWindowLocked(asset Asset, window time.Duration) Amount {
 	cutoff := w.clock().Add(-window)
 	var total Amount
@@ -97,7 +99,41 @@ func (w *Wallet) spentInWindowLocked(asset Asset, window time.Duration) Amount {
 		}
 		total += r.amount
 	}
+	for _, r := range w.capReservations {
+		if r.asset != asset {
+			continue
+		}
+		if r.at.Before(cutoff) {
+			continue
+		}
+		total += r.amount
+	}
 	return total
+}
+
+// reserveSpendLocked books an in-flight spend and returns its handle.
+// Called under the same capMu acquisition as checkSpendCapLocked so the
+// check and the claim are one atomic step: the lock can then be dropped
+// for a slow remote call without a second caller seeing stale budget.
+// Every reservation must be handed back to releaseReservationLocked.
+// w.capMu must be held.
+func (w *Wallet) reserveSpendLocked(asset Asset, amount Amount) uint64 {
+	if w.capReservations == nil {
+		w.capReservations = make(map[uint64]spendRecord)
+	}
+	w.capReservationSeq++
+	id := w.capReservationSeq
+	w.capReservations[id] = spendRecord{at: w.clock(), asset: asset, amount: amount}
+	return id
+}
+
+// releaseReservationLocked drops a reservation booked by
+// reserveSpendLocked. Callers that went on to succeed follow it with
+// recordSpendLocked, which makes the spend permanent (and durable);
+// callers that failed simply release, returning the budget.
+// w.capMu must be held.
+func (w *Wallet) releaseReservationLocked(id uint64) {
+	delete(w.capReservations, id)
 }
 
 // pruneSpendLogLocked drops records older than the longest configured
