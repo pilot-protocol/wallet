@@ -259,25 +259,49 @@ func (w *Wallet) SatisfyEVM(ctx context.Context, c payment.Contract) (payment.Re
 	return w.SatisfyEVMOn(ctx, w.evm.chainID, c)
 }
 
+// DefaultEVMAsset is the asset an EVM payment contract denominates in
+// when it leaves the Asset field empty. The EVM signer only ever
+// produces EIP-3009 authorizations against the chain's USDC contract,
+// so an unset Asset means USDC.
+const DefaultEVMAsset Asset = "USDC"
+
+// NormalizeEVMAsset resolves a contract's Asset field to the symbol the
+// EVM signer actually operates on. An empty field resolves to
+// DefaultEVMAsset; anything else is passed through untouched (the
+// signer rejects assets it can't produce). Cap accounting and the
+// signer must agree on this value, so both sides call through here.
+func NormalizeEVMAsset(asset string) Asset {
+	if asset == "" {
+		return DefaultEVMAsset
+	}
+	return Asset(asset)
+}
+
 // SatisfyEVMOn is the multichain entry point. The caller passes the
 // chain id explicitly — the IPC dispatcher exposes this as an
 // optional `chain_id` field on wallet.evm.satisfy. Caps are checked
 // against the same wallet-wide spendLog as SatisfyEVM and Pay so a
 // multichain wallet can't dodge a cap by switching chains.
+//
+// The contract's Asset is resolved through NormalizeEVMAsset before
+// either the cap check or the signer sees it, so both accounts for the
+// same asset regardless of how the caller spelled it.
 func (w *Wallet) SatisfyEVMOn(ctx context.Context, chainID uint64, c payment.Contract) (payment.Receipt, error) {
 	binding := w.evmByChain[chainID]
 	if binding == nil {
 		return payment.Receipt{}, fmt.Errorf("wallet.evm.satisfy: chain %d not configured", chainID)
 	}
+	asset := NormalizeEVMAsset(c.Asset)
+	c.Asset = string(asset)
 	w.capMu.Lock()
 	defer w.capMu.Unlock()
-	if err := w.checkSpendCapLocked(Asset(c.Asset), Amount(c.Amount)); err != nil {
+	if err := w.checkSpendCapLocked(asset, Amount(c.Amount)); err != nil {
 		return payment.Receipt{}, err
 	}
 	receipt, err := binding.method.Satisfy(ctx, c)
 	if err != nil {
 		return payment.Receipt{}, err
 	}
-	w.recordSpendLocked(Asset(c.Asset), Amount(c.Amount))
+	w.recordSpendLocked(asset, Amount(c.Amount))
 	return receipt, nil
 }

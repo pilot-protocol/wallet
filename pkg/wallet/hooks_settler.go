@@ -61,16 +61,35 @@ func (w *Wallet) SettlerTransfer(
 	}
 	a := Asset(asset)
 	amt := Amount(amount)
+
+	// Check and claim the budget in one capMu acquisition, then drop
+	// the lock for the settler round-trip so a slow or hung settler
+	// doesn't stall every other cap-gated path on this wallet. The
+	// reservation keeps the check-then-record pair atomic: it already
+	// counts against the cap, so a concurrent caller can't be granted
+	// budget this transfer is holding.
 	w.capMu.Lock()
-	defer w.capMu.Unlock()
 	if err := w.checkSpendCapLocked(a, amt); err != nil {
+		w.capMu.Unlock()
 		return settlerclient.Transaction{}, err
 	}
+	reservation := w.reserveSpendLocked(a, amt)
+	w.capMu.Unlock()
+
 	tx, err := w.settler.Transfer(ctx, w.signer, to, asset, amount, memo, expiresIn)
+
+	w.capMu.Lock()
+	w.releaseReservationLocked(reservation)
+	if err == nil {
+		// Settled: convert the reservation into a permanent (and, when
+		// a cap-state file is configured, durable) record.
+		w.recordSpendLocked(a, amt)
+	}
+	w.capMu.Unlock()
+
 	if err != nil {
 		return settlerclient.Transaction{}, err
 	}
-	w.recordSpendLocked(a, amt)
 	return tx, nil
 }
 

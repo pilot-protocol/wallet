@@ -115,6 +115,9 @@ func evmSatisfyHandler(w *wallet.Wallet) ipc.Handler {
 			return nil, fmt.Errorf("decode satisfy req: %w", err)
 		}
 		chainID := chainOrPrimary(w, inner.ChainID)
+		// Resolve the contract's asset at the boundary so the cap
+		// accounting and the signer operate on the same symbol.
+		inner.Contract.Asset = string(wallet.NormalizeEVMAsset(inner.Contract.Asset))
 		// Route through Wallet.SatisfyEVMOn so the same rolling-window
 		// spend cap that gates Pay also gates on-chain receipts, even
 		// when the caller targets a non-primary chain.
