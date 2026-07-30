@@ -128,7 +128,7 @@ func (m *EVMMethod) Satisfy(_ context.Context, c payment.Contract) (payment.Rece
 		Nonce:       nonce,
 	}
 	domain := Domain{
-		Name:              "USD Coin",
+		Name:              usdcDomainName(m.chainID),
 		Version:           "2",
 		ChainID:           m.chainID,
 		VerifyingContract: m.token,
@@ -225,7 +225,7 @@ func (m *EVMMethod) Verify(_ context.Context, c payment.Contract, r payment.Rece
 		Nonce: nonce,
 	}
 	domain := Domain{
-		Name:              "USD Coin",
+		Name:              usdcDomainName(p.ChainID),
 		Version:           "2",
 		ChainID:           p.ChainID,
 		VerifyingContract: p.Token,

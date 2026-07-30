@@ -61,17 +61,34 @@ func KnownChainIDs() []uint64 {
 	}
 }
 
+// usdcDomainName returns the EIP-712 domain name of the USDC contract
+// deployed on chainID. The mainnet FiatToken deployments use "USD Coin",
+// but Circle's Base Sepolia testnet deployment uses "USDC" — signing with
+// the wrong name produces a different domain separator, so the contract
+// (and any x402 facilitator) rejects the signature. Values verified
+// against each contract's on-chain name() and DOMAIN_SEPARATOR(); they
+// also match the per-network EIP-712 metadata in x402's asset registry
+// (go/mechanisms/evm/constants.go).
+//
+// Unknown chains fall back to "USD Coin", preserving the previous
+// behavior for custom deployments passed via token override.
+func usdcDomainName(chainID uint64) string {
+	if chainID == ChainBaseSepolia {
+		return "USDC"
+	}
+	return "USD Coin"
+}
+
 // USDCDomain returns the EIP-712 Domain for USDC on chainID, ready to
-// pass to EIP3009Digest. USDC's EIP-712 domain uses name="USD Coin"
-// and version="2" on every chain (verified against the deployed FiatToken
-// contracts).
+// pass to EIP3009Digest. version="2" on every supported chain; the
+// domain name is per-chain (see usdcDomainName).
 func USDCDomain(chainID uint64) (Domain, error) {
 	addr, err := USDCAddress(chainID)
 	if err != nil {
 		return Domain{}, err
 	}
 	return Domain{
-		Name:              "USD Coin",
+		Name:              usdcDomainName(chainID),
 		Version:           "2",
 		ChainID:           chainID,
 		VerifyingContract: addr,
