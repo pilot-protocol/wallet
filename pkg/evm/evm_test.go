@@ -115,18 +115,48 @@ func TestTransferWithAuthorizationTypeHash(t *testing.T) {
 }
 
 func TestUSDCDomainKnownChains(t *testing.T) {
-	for _, chainID := range []uint64{ChainEthereumMainnet, ChainBaseMainnet, ChainBaseSepolia} {
+	wantName := map[uint64]string{
+		ChainEthereumMainnet: "USD Coin",
+		ChainBaseMainnet:     "USD Coin",
+		ChainPolygonMainnet:  "USD Coin",
+		ChainBaseSepolia:     "USDC", // Circle's testnet deployment differs
+	}
+	for chainID, name := range wantName {
 		d, err := USDCDomain(chainID)
 		if err != nil {
 			t.Fatalf("USDCDomain(%d): %v", chainID, err)
 		}
-		if d.Name != "USD Coin" || d.Version != "2" || d.ChainID != chainID {
-			t.Errorf("domain for chain %d wrong: %+v", chainID, d)
+		if d.Name != name || d.Version != "2" || d.ChainID != chainID {
+			t.Errorf("domain for chain %d wrong: %+v (want name %q)", chainID, d, name)
 		}
 		// Separator must be 32 bytes.
 		sep := d.Separator()
 		if len(sep) != 32 {
 			t.Errorf("chain %d separator len %d", chainID, len(sep))
+		}
+	}
+}
+
+// TestUSDCDomainSeparatorsMatchOnChain pins Domain.Separator() for every
+// supported chain to the value the deployed USDC contract returns from
+// DOMAIN_SEPARATOR() (fetched via eth_call, 2026-07-29). If any of these
+// fail, signatures produced for that chain are unverifiable on-chain —
+// this is the regression test for the Base Sepolia "USD Coin"/"USDC"
+// domain-name mismatch.
+func TestUSDCDomainSeparatorsMatchOnChain(t *testing.T) {
+	onChain := map[uint64]string{
+		ChainEthereumMainnet: "06c37168a7db5138defc7866392bb87a741f9b3d104deb5094588ce041cae335",
+		ChainBaseMainnet:     "02fa7265e7c5d81118673727957699e4d68f74cd74b7db77da710fe8a2c7834f",
+		ChainPolygonMainnet:  "caa2ce1a5703ccbe253a34eb3166df60a705c561b44b192061e28f2a985be2ca",
+		ChainBaseSepolia:     "71f17a3b2ff373b803d70a5a07c046c1a2bc8e89c09ef722fcb047abe94c9818",
+	}
+	for chainID, want := range onChain {
+		d, err := USDCDomain(chainID)
+		if err != nil {
+			t.Fatalf("USDCDomain(%d): %v", chainID, err)
+		}
+		if got := hex.EncodeToString(d.Separator()); got != want {
+			t.Errorf("chain %d separator %s, on-chain DOMAIN_SEPARATOR() is %s", chainID, got, want)
 		}
 	}
 }
