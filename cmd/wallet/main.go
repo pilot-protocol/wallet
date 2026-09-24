@@ -273,11 +273,14 @@ func run(ctx context.Context, args []string) error {
 	// is created as 0o600 atomically — no TOCTOU window between
 	// socket creation and a post-hoc Chmod.
 	oldMask := syscall.Umask(0o177)
-	listener, err := net.Listen("unix", *sockPath)
+	ln, err := net.Listen("unix", *sockPath)
 	syscall.Umask(oldMask)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", *sockPath, err)
 	}
+	// Remember which socket file we bound, so shutdown never unlinks a
+	// socket a replacement instance has bound at the same path since.
+	listener := ownSocket(ln.(*net.UnixListener), *sockPath, logger)
 	// Chmod is a belt-and-suspenders backup; the umask above covers
 	// the primary case. On the off-chance a platform doesn't apply
 	// umask to unix sockets, the explicit chmod is the fallback.
@@ -296,8 +299,8 @@ func serve(ctx context.Context, listener net.Listener, d *ipc.Dispatcher, logger
 	go func() {
 		<-ctx.Done()
 		logger.Printf("shutting down")
-		if ul, ok := listener.(*net.UnixListener); ok {
-			_ = ul.SetDeadline(time.Now())
+		if dl, ok := listener.(interface{ SetDeadline(time.Time) error }); ok {
+			_ = dl.SetDeadline(time.Now())
 		}
 		_ = listener.Close()
 	}()
