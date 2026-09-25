@@ -28,6 +28,7 @@ func NewDispatcher(w *wallet.Wallet) *ipc.Dispatcher {
 	d.Register(MethodSettle, settleHandler(w))
 	d.Register(MethodTopup, topupHandler(w))
 	d.Register(MethodHistory, historyHandler(w))
+	d.Register(MethodHelp, helpHandler(w))
 	RegisterEVM(d, w)
 	RegisterSettler(d, w)
 	return d

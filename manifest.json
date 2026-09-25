@@ -28,7 +28,8 @@
     "wallet.settler.history",
     "wallet.settler.transfer",
     "wallet.hookPreSendMessage",
-    "wallet.hookPostRecvMessage"
+    "wallet.hookPostRecvMessage",
+    "wallet.help"
   ],
   "grants": [
     {"cap": "fs.write", "target": "$APP/data.db"},
