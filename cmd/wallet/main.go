@@ -48,7 +48,7 @@ const shutdownGrace = 5 * time.Second
 // Version is the wallet binary's release tag. Kept in sync with the
 // app_version field in manifest.json — `manifest_test.go` cross-checks
 // they agree, so a release without bumping both fails CI.
-const Version = "0.3.3"
+const Version = "0.3.4"
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -208,6 +208,7 @@ func run(ctx context.Context, args []string) error {
 		logger.Printf("spend caps: %d active from %s", len(caps), *mfPath)
 	}
 
+	walletipc.Version = Version
 	dispatcher := walletipc.NewDispatcher(w)
 	walletipc.RegisterEVM(dispatcher, w)
 
