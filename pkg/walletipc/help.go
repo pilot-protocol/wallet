@@ -33,12 +33,12 @@ var helpCore = []helpMethod{
 		"limit": "int — page size", "before_unix_nano": "int — cursor: the oldest timestamp from the prior page",
 		"since_unix_nano": "int — only newer transactions", "asset": "string — filter by asset", "kind": "string — filter by transaction kind"}, "fast"},
 	{MethodRequest, "Create a payment challenge for a peer to pay.", map[string]string{
-		"amount": "string (required) — amount in the asset's smallest unit", "asset": "string (required)",
+		"amount": "int (required) — amount in the asset's smallest unit", "asset": "string (required)",
 		"expires_in_seconds": "int (required) — challenge lifetime", "memo": "string — shown to the payer"}, "fast"},
 	{MethodPay, "Sign a payment authorization for a challenge. Enforced against spend caps.", map[string]string{"challenge": "object (required) — from the payee's wallet.request"}, "fast"},
 	{MethodVerify, "Check a signed authorization against its challenge without settling.", map[string]string{"challenge": "object (required)", "signed_auth": "object (required) — from wallet.pay"}, "fast"},
 	{MethodSettle, "Verify and settle a signed authorization into this wallet.", map[string]string{"challenge": "object (required)", "signed_auth": "object (required)"}, "fast"},
-	{MethodTopup, "Credit this wallet from an external source.", map[string]string{"asset": "string (required)", "amount": "string (required)", "source": "string (required) — where the funds came from"}, "fast"},
+	{MethodTopup, "Credit this wallet from an external source.", map[string]string{"asset": "string (required)", "amount": "int (required) — amount in the asset's smallest unit", "source": "string (required) — where the funds came from"}, "fast"},
 }
 
 var helpEVM = []helpMethod{
