@@ -68,19 +68,21 @@ func main() {
 func run(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("wallet", flag.ContinueOnError)
 	var (
-		addr      = fs.String("addr", "", "pilot address (e.g. 0:0001.HHHH.LLLL); required")
-		dbPath    = fs.String("db", defaultPath("data.db"), "sqlite ledger path")
-		sockPath  = fs.String("socket", defaultPath("wallet.sock"), "unix socket to listen on")
-		idPath    = fs.String("identity", defaultPath("identity.json"), "ed25519 identity file (created on first start)")
-		mfPath    = fs.String("manifest", "", "path to manifest.json; when set, key.sign:cap grants activate runtime spend caps")
-		capState  = fs.String("cap-state", "", "JSONL spend log; persists rolling-window cap state across wallet restarts so caps aren't bypassable by daemon-restart")
-		evmIDPath  = fs.String("evm-identity", defaultPath("identity-evm.json"), "secp256k1 identity for EVM/USDC payments (created on first start)")
-		evmChains  = fs.String("evm-chains", "8453,1,137", "comma-separated EVM chain IDs to enable. First is primary (used when wallet.evm.* requests omit chain_id). Known: 1=Ethereum, 8453=Base, 137=Polygon, 84532=Base Sepolia. $PILOT_EVM_CHAINS overrides this when --evm-chains was left at the default.")
-		evmRPC     = fs.String("evm-rpc", "", "PRIMARY chain's JSON-RPC endpoint. For per-chain endpoints use PILOT_EVM_RPC_<CHAINID> env vars (e.g. PILOT_EVM_RPC_137=https://polygon-rpc.com). Falls back to $PILOT_EVM_RPC for the primary chain.")
-		evmOff     = fs.Bool("no-evm", false, "disable every wallet.evm.* method (no secp256k1 key created)")
+		addr             = fs.String("addr", "", "pilot address (e.g. 0:0001.HHHH.LLLL); required")
+		dbPath           = fs.String("db", defaultPath("data.db"), "sqlite ledger path")
+		sockPath         = fs.String("socket", defaultPath("wallet.sock"), "unix socket to listen on")
+		idPath           = fs.String("identity", defaultPath("identity.json"), "ed25519 identity file (created on first start)")
+		mfPath           = fs.String("manifest", "", "path to manifest.json; when set, key.sign:cap grants activate runtime spend caps")
+		capState         = fs.String("cap-state", "", "JSONL spend log; persists rolling-window cap state across wallet restarts so caps aren't bypassable by daemon-restart")
+		evmIDPath        = fs.String("evm-identity", defaultPath("identity-evm.json"), "secp256k1 identity for EVM/USDC payments (created on first start)")
+		evmChains        = fs.String("evm-chains", "8453,1,137", "comma-separated EVM chain IDs to enable. First is primary (used when wallet.evm.* requests omit chain_id). Known: 1=Ethereum, 8453=Base, 137=Polygon, 84532=Base Sepolia. $PILOT_EVM_CHAINS overrides this when --evm-chains was left at the default.")
+		evmRPC           = fs.String("evm-rpc", "", "PRIMARY chain's JSON-RPC endpoint. For per-chain endpoints use PILOT_EVM_RPC_<CHAINID> env vars (e.g. PILOT_EVM_RPC_137=https://polygon-rpc.com). Falls back to $PILOT_EVM_RPC for the primary chain.")
+		evmOff           = fs.Bool("no-evm", false, "disable every wallet.evm.* method (no secp256k1 key created)")
 		settlerAddr      = fs.String("settler-addr", "", "TCP endpoint of the pilot-protocol/settler service (host:port). Empty disables wallet.settler.* methods. Env: PILOT_SETTLER_ADDR.")
 		settlerPubkeyHex = fs.String("settler-pubkey", "", "expected settler ed25519 pubkey (hex) — when set, the wallet refuses to start if the live settler advertises a different pubkey. Env: PILOT_SETTLER_PUBKEY.")
-		showVer   = fs.Bool("version", false, "print version and exit")
+		showVer          = fs.Bool("version", false, "print version and exit")
+		exitWithParent   = fs.Bool("exit-with-parent", true, "shut down when the process that started the wallet (the pilot daemon) exits, instead of lingering as an orphan")
+		logConns         = fs.Bool("log-conns", false, "log every IPC connection open/close (one pair of lines per call; off by default so the daemon log does not grow with call volume)")
 	)
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
@@ -99,6 +101,12 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	logger := log.New(os.Stderr, "wallet ", log.LstdFlags|log.Lmicroseconds)
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if *exitWithParent && watchParent(ctx, cancel, startPPID, parentPollInterval, logger) {
+		logger.Printf("watching parent pid %d", startPPID)
+	}
 	logger.Printf("starting addr=%s db=%s socket=%s identity=%s", *addr, *dbPath, *sockPath, *idPath)
 
 	signer, err := wallet.LoadOrCreateLocalSigner(*idPath)
@@ -266,11 +274,14 @@ func run(ctx context.Context, args []string) error {
 	// is created as 0o600 atomically — no TOCTOU window between
 	// socket creation and a post-hoc Chmod.
 	oldMask := syscall.Umask(0o177)
-	listener, err := net.Listen("unix", *sockPath)
+	ln, err := net.Listen("unix", *sockPath)
 	syscall.Umask(oldMask)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", *sockPath, err)
 	}
+	// Remember which socket file we bound, so shutdown never unlinks a
+	// socket a replacement instance has bound at the same path since.
+	listener := ownSocket(ln.(*net.UnixListener), *sockPath, logger)
 	// Chmod is a belt-and-suspenders backup; the umask above covers
 	// the primary case. On the off-chance a platform doesn't apply
 	// umask to unix sockets, the explicit chmod is the fallback.
@@ -279,18 +290,18 @@ func run(ctx context.Context, args []string) error {
 	}
 	logger.Printf("listening on %s methods=%d", *sockPath, len(dispatcher.Methods()))
 
-	return serve(ctx, listener, dispatcher, logger)
+	return serve(ctx, listener, dispatcher, logger, *logConns)
 }
 
 // serve is the accept loop. Returns nil on clean shutdown.
-func serve(ctx context.Context, listener net.Listener, d *ipc.Dispatcher, logger *log.Logger) error {
+func serve(ctx context.Context, listener net.Listener, d *ipc.Dispatcher, logger *log.Logger, logConns bool) error {
 	// Close the listener when ctx is canceled. On macOS Close() alone
 	// doesn't always unblock a pending Accept(); a past-deadline pokes it.
 	go func() {
 		<-ctx.Done()
 		logger.Printf("shutting down")
-		if ul, ok := listener.(*net.UnixListener); ok {
-			_ = ul.SetDeadline(time.Now())
+		if dl, ok := listener.(interface{ SetDeadline(time.Time) error }); ok {
+			_ = dl.SetDeadline(time.Now())
 		}
 		_ = listener.Close()
 	}()
@@ -327,11 +338,15 @@ acceptLoop:
 				case <-stop:
 				}
 			}()
-			logger.Printf("conn open from=%s", c.RemoteAddr())
+			if logConns {
+				logger.Printf("conn open from=%s", c.RemoteAddr())
+			}
 			if err := ipc.Serve(ctx, c, d); err != nil {
 				logger.Printf("serve: %v", err)
 			}
-			logger.Printf("conn closed")
+			if logConns {
+				logger.Printf("conn closed")
+			}
 		}(conn)
 	}
 

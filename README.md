@@ -16,3 +16,15 @@ Wallet primitives for the Pilot Protocol: Ed25519 keypairs (the daemon identity)
 ```bash
 go test -race -coverprofile=coverage.out -covermode=atomic ./...
 ```
+
+## Release
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`:
+
+1. Tests.
+2. A native `CGO_ENABLED=0` build on linux/amd64, linux/arm64, darwin/amd64 and darwin/arm64. The job checks each binary's `file` output and requires `wallet -version` to equal the tag.
+3. The binary's sha256 is pinned into `manifest.json`, which is signed with the `PILOT_APP_PUBLISHER_KEY` repo secret (public key `ed25519:VF8fdEP/Oe2aWN3ozQ7Ar22137tHb7dkSw0hlzlk/os=`, the catalogue's publisher pin for `io.pilot.wallet`).
+4. Each platform is packed as `io.pilot.wallet-<version>-<os>-<arch>.tar.gz` by `scripts/pack-bundle.py`.
+5. The four bundles are published with `checksums.txt` and build provenance.
+
+The catalogue entry (pilot-protocol/pilotprotocol `catalogue/catalogue.json`) then gets a `bundles` map with one entry per platform, built from those URLs and checksums. The `Version` constant in `cmd/wallet` and `app_version` in `manifest.json` must equal the tag.
