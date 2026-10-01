@@ -1,0 +1,171 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v-prefixed tag to build
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  EXPECTED_PUBLISHER: ed25519:VF8fdEP/Oe2aWN3ozQ7Ar22137tHb7dkSw0hlzlk/os=
+  # pilotctl that signs the manifests. Pinned to a release tag: this step
+  # handles the publisher private key, so it must not build whatever is on
+  # pilotprotocol's main branch at release time.
+  PILOTCTL_REF: v1.13.10
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25'
+          cache: true
+      - run: go test -race -timeout 3m ./...
+
+  build:
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            file_pattern: ELF 64-bit LSB executable, x86-64
+          - os: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+            file_pattern: ELF 64-bit LSB executable, ARM aarch64
+          - os: macos-15-intel
+            goos: darwin
+            goarch: amd64
+            file_pattern: Mach-O 64-bit executable x86_64
+          - os: macos-15
+            goos: darwin
+            goarch: arm64
+            file_pattern: Mach-O 64-bit executable arm64
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/checkout@v7
+        with:
+          repository: pilot-protocol/pilotprotocol
+          path: pilotprotocol
+          ref: ${{ env.PILOTCTL_REF }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Resolve release version
+        id: version
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          case "$RELEASE_TAG" in
+            v*) ;;
+            *) echo "::error::release tag must start with v"; exit 1 ;;
+          esac
+          echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build native wallet
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p stage/bin out
+          go build -trimpath -ldflags='-s -w' -o stage/bin/wallet ./cmd/wallet
+          FILE_OUTPUT=$(file -b stage/bin/wallet)
+          echo "$FILE_OUTPUT"
+          case "$FILE_OUTPUT" in
+            *"${{ matrix.file_pattern }}"*) ;;
+            *) echo "::error::wrong executable format for $GOOS/$GOARCH: $FILE_OUTPUT"; exit 1 ;;
+          esac
+          test "$(stage/bin/wallet -version)" = "${{ steps.version.outputs.version }}"
+
+      - name: Pin binary and sign manifest
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PUBLISHER_PRIVATE_KEY: ${{ secrets.PILOT_APP_PUBLISHER_KEY }}
+        run: |
+          if [ -z "$PUBLISHER_PRIVATE_KEY" ]; then
+            echo "::error::PILOT_APP_PUBLISHER_KEY is required for a release"
+            exit 1
+          fi
+          SHA=$(shasum -a 256 stage/bin/wallet | awk '{print $1}')
+          jq --arg sha "$SHA" --arg version "$VERSION" \
+            '.binary.sha256 = $sha | .app_version = $version' manifest.json > stage/manifest.json
+          KEY_FILE="$RUNNER_TEMP/wallet-publisher.key"
+          printf '%s' "$PUBLISHER_PRIVATE_KEY" > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+          go -C pilotprotocol build -o "$RUNNER_TEMP/pilotctl" ./cmd/pilotctl
+          "$RUNNER_TEMP/pilotctl" appstore sign --key "$KEY_FILE" stage/manifest.json
+          rm -f "$KEY_FILE" "$RUNNER_TEMP/pilotctl"
+          test "$(jq -r .store.publisher stage/manifest.json)" = "$EXPECTED_PUBLISHER"
+          test "$(jq -r .binary.sha256 stage/manifest.json)" = "$SHA"
+
+      - name: Package platform bundle
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ARCHIVE="io.pilot.wallet-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz"
+          # Deterministic tarball (fixed owner, mode and mtime; no macOS
+          # AppleDouble/xattr entries): manifest.json + bin/wallet, the
+          # layout pilotctl installs.
+          python3 scripts/pack-bundle.py stage "out/$ARCHIVE" "$(git log -1 --format=%ct)"
+          tar -tvzf "out/$ARCHIVE"
+          shasum -a 256 "out/$ARCHIVE" > "out/$ARCHIVE.sha256"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wallet-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: out/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: wallet-*
+          path: release
+          merge-multiple: true
+      - name: Verify release set
+        run: |
+          test "$(find release -name '*.tar.gz' -type f | wc -l)" -eq 4
+          cd release
+          sha256sum --check ./*.sha256
+          sha256sum ./*.tar.gz > checksums.txt
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: release/*.tar.gz
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --generate-notes \
+            --title "Wallet $RELEASE_TAG" \
+            release/*.tar.gz release/*.sha256 release/checksums.txt
