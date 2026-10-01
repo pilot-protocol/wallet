@@ -259,6 +259,7 @@ func run(ctx context.Context, args []string) error {
 		logger.Printf("settler: endpoint=%s anchor=%v", settlerEP, anchor != nil)
 	}
 
+	walletipc.Version = Version
 	dispatcher := walletipc.NewDispatcher(w)
 
 	// If a stale socket exists from a previous crash, drop it. unix sockets

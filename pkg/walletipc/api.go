@@ -48,6 +48,7 @@ const (
 var AllMethods = []string{
 	MethodBalance, MethodBalances, MethodAddress, MethodRequest, MethodPay,
 	MethodVerify, MethodSettle, MethodTopup, MethodHistory, MethodSpendCaps,
+	MethodHelp,
 }
 
 // AllEVMMethods is the extra set the dispatcher registers when the
