@@ -44,6 +44,9 @@ func TestMain(m *testing.M) {
 			os.Exit(2)
 		}
 		os.Setenv("HOME", home)
+		// Nor pilotctl's real backups or install root.
+		os.Unsetenv("PILOT_APPSTORE_BACKUP_ROOT")
+		os.Unsetenv("PILOT_APPSTORE_ROOT")
 		code := m.Run()
 		os.RemoveAll(home)
 		os.Exit(code)
@@ -121,6 +124,7 @@ func TestWalletExitsWhenParentDies(t *testing.T) {
 		"--socket", sock,
 		"--identity", filepath.Join(dir, "identity.json"),
 		"--cap-state", filepath.Join(dir, "cap-state.jsonl"),
+		"--key-vault", filepath.Join(t.TempDir(), "vault"),
 		"--no-evm",
 	})
 

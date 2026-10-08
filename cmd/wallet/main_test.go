@@ -33,6 +33,7 @@ func TestRunSmoke(t *testing.T) {
 			"--db", db,
 			"--socket", sock,
 			"--identity", id,
+			"--key-vault", t.TempDir(),
 		})
 	}()
 
@@ -130,6 +131,7 @@ func TestRunActivatesManifestSpendCaps(t *testing.T) {
 			"--socket", sock,
 			"--identity", id,
 			"--manifest", mfPath,
+			"--key-vault", t.TempDir(),
 		})
 	}()
 

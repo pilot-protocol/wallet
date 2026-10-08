@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"os"
@@ -39,11 +40,23 @@ import (
 // a restore links the validated copy into place, which fails rather than
 // replace a file that appeared meanwhile.
 type keyVault struct {
+	root    string   // the vault root ("" = no mirror)
+	appID   string   // the install dir's name
 	dir     string   // the mirror for this install path; "" turns it off
 	backups []string // pilotctl's backup dirs for this app
-	install string   // the install dir; <install>.previous-* are searched too
+	install string   // the install dir; <install>.previous[-*] are searched too
 	logger  *log.Logger
 }
+
+// errNotAKeyCopy marks a candidate that is not a usable copy of the key: not a
+// regular file of this user's, or not a key. The next candidate is tried. Any
+// other error (a copy that cannot be read or put in place) stops the restore:
+// the wallet then exits and the daemon retries, rather than starting on a new
+// or older key while the right one is on disk.
+var errNotAKeyCopy = errors.New("not a usable copy of the key")
+
+// linkFile makes a hard link; a test seam for filesystems without them.
+var linkFile = os.Link
 
 // newKeyVault is the vault for identity files kept in installDir: its mirror
 // under vaultRoot (empty = no mirror), and pilotctl's backups of this app,
@@ -57,7 +70,7 @@ func newKeyVault(vaultRoot, installDir string, logger *log.Logger) *keyVault {
 	}
 	appID := filepath.Base(installDir)
 	root := filepath.Dir(installDir)
-	v := &keyVault{install: installDir, logger: logger}
+	v := &keyVault{root: vaultRoot, appID: appID, install: installDir, logger: logger}
 	if vaultRoot != "" {
 		sum := sha256.Sum256([]byte(installDir))
 		v.dir = filepath.Join(vaultRoot, appID+"-"+hex.EncodeToString(sum[:])[:12])
@@ -83,9 +96,14 @@ func defaultKeyVaultDir() string {
 
 // restore puts back the identity file at path from the best copy that valid
 // accepts, when path does not exist, and reports where it came from ("" =
-// nothing restored: path exists, or no copy was found and a new key will be
-// created). valid loads a candidate the way the wallet will, so a corrupt or
-// unrelated file is never put in place of a missing key.
+// path exists, or no copy exists anywhere and a new key may be created).
+// valid loads a candidate the way the wallet will, so a corrupt or unrelated
+// file is never put in place of a missing key.
+//
+// It returns an error, and the wallet does not start, when a copy cannot be
+// read or put in place, and when copies of this key exist that it does not
+// restore from (another install path's mirror): a new key is created only
+// when there is no copy at all.
 func (v *keyVault) restore(path string, valid func(string) error) (string, error) {
 	if _, err := os.Lstat(path); err == nil || !errors.Is(err, fs.ErrNotExist) {
 		return "", nil
@@ -94,9 +112,12 @@ func (v *keyVault) restore(path string, valid func(string) error) (string, error
 	cands := v.candidates(name)
 	for i, src := range cands {
 		placed, err := v.restoreFrom(src, path, valid)
-		if err != nil {
-			v.logger.Printf("key vault: not restoring %s from %s: %v", path, src, err)
+		if errors.Is(err, errNotAKeyCopy) {
+			v.logger.Printf("key vault: skipping %s: %v", src, err)
 			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("%s is missing and the copy at %s could not be restored: %w", path, src, err)
 		}
 		if !placed {
 			return "", nil // the file appeared meanwhile: leave it
@@ -105,23 +126,40 @@ func (v *keyVault) restore(path string, valid func(string) error) (string, error
 		v.warnDifferentCopies(path, cands[i+1:], valid)
 		return src, nil
 	}
+	if others := v.otherCopies(name, filepath.Dir(path), valid); len(others) > 0 {
+		return "", fmt.Errorf("%s is missing, and copies of it exist for another install path: %s. Not creating a new key: copy the right one to %s, or move these away to start over",
+			path, strings.Join(others, ", "), path)
+	}
 	return "", nil
 }
 
-// restoreFrom validates src in a temp file beside path and links it into
-// place. It reports false, with no error, when path appeared meanwhile.
+// restoreFrom validates src in a temp file beside path and puts it in place
+// without replacing anything: a hard link, or an exclusive create where links
+// are not supported. It reports false, with no error, when path appeared
+// meanwhile, and errNotAKeyCopy for a candidate that is not this user's key.
 func (v *keyVault) restoreFrom(src, path string, valid func(string) error) (bool, error) {
-	fi, err := os.Lstat(src)
+	f, err := openNoFollow(src)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) || isSymlinkErr(src) {
+			return false, fmt.Errorf("%w: %v", errNotAKeyCopy, err)
+		}
+		return false, err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
 		return false, err
 	}
 	if !fi.Mode().IsRegular() {
-		return false, errors.New("not a regular file")
+		f.Close()
+		return false, fmt.Errorf("%w: not a regular file", errNotAKeyCopy)
 	}
 	if !ownedByMe(fi) {
-		return false, errors.New("owned by another user")
+		f.Close()
+		return false, fmt.Errorf("%w: owned by another user", errNotAKeyCopy)
 	}
-	b, err := os.ReadFile(src)
+	b, err := io.ReadAll(f)
+	f.Close()
 	if err != nil {
 		return false, err
 	}
@@ -133,20 +171,99 @@ func (v *keyVault) restoreFrom(src, path string, valid func(string) error) (bool
 	if err != nil {
 		return false, err
 	}
-	defer func() { _ = os.Remove(tmp) }() // the temp name only; path keeps its link
+	defer func() { _ = os.Remove(tmp) }() // the temp name only
 	if err := valid(tmp); err != nil {
-		return false, fmt.Errorf("not a usable key: %w", err)
+		return false, fmt.Errorf("%w: %v", errNotAKeyCopy, err)
 	}
 	if fi.Mode().Perm()&0o077 != 0 {
 		v.logger.Printf("key vault: %s was readable by others (mode %#o); restored as 0600", src, fi.Mode().Perm())
 	}
-	if err := os.Link(tmp, path); err != nil {
+	return placeExclusive(tmp, path, b)
+}
+
+// placeExclusive puts the bytes b, already written to tmp, at path without
+// replacing a file there: a hard link of tmp, or, where hard links are not
+// supported, an exclusive create of path written and synced. It reports
+// false, with no error, when path exists.
+func placeExclusive(tmp, path string, b []byte) (bool, error) {
+	err := linkFile(tmp, path)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, fs.ErrExist) {
+		return false, nil
+	}
+	return createExclusive(path, b)
+}
+
+// createExclusive creates path (0600, failing if it exists) holding b, synced.
+func createExclusive(path string, b []byte) (bool, error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return false, nil
 		}
 		return false, err
 	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		_ = os.Remove(path) // the partial file this call created, nothing else
+		return false, err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		_ = os.Remove(path)
+		return false, err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return false, err
+	}
 	return true, nil
+}
+
+// isSymlinkErr reports whether p is a symlink (an O_NOFOLLOW open of it fails
+// with ELOOP, or EMLINK on some systems).
+func isSymlinkErr(p string) bool {
+	fi, err := os.Lstat(p)
+	return err == nil && fi.Mode()&fs.ModeSymlink != 0
+}
+
+// otherCopies lists usable copies of name kept for this app under another
+// install path, and a copy at the vault root itself: never restored from (a
+// different install's key), but the reason not to create a new one.
+func (v *keyVault) otherCopies(name, liveDir string, valid func(string) error) []string {
+	if v.root == "" {
+		return nil
+	}
+	paths, _ := filepath.Glob(filepath.Join(v.root, v.appID+"-*", name))
+	paths = append(paths, filepath.Join(v.root, name))
+	var out []string
+	for _, p := range paths {
+		if filepath.Dir(p) == v.dir {
+			continue
+		}
+		fi, err := os.Lstat(p)
+		if err != nil || !fi.Mode().IsRegular() || !ownedByMe(fi) {
+			continue
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			out = append(out, p) // unreadable, but a copy: still a reason to stop
+			continue
+		}
+		tmp, err := writeTemp(liveDir, name, b)
+		if err != nil {
+			out = append(out, p)
+			continue
+		}
+		ok := valid(tmp) == nil
+		_ = os.Remove(tmp)
+		if ok {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // warnDifferentCopies logs every other usable copy holding a different key
@@ -288,12 +405,15 @@ func (v *keyVault) keep(path string) error {
 			if err != nil {
 				return err
 			}
-			err = os.Link(tmp, dst)
+			placed, err := placeExclusive(tmp, dst, live)
 			_ = os.Remove(tmp)
-			if errors.Is(err, fs.ErrExist) {
+			if err != nil {
+				return err
+			}
+			if !placed {
 				continue // another start wrote it meanwhile: compare again
 			}
-			return err
+			return nil
 		default:
 			return fmt.Errorf("the copy kept at %s cannot be read (%v); left as it is", dst, err)
 		}
@@ -309,12 +429,22 @@ func linkUnique(src, name string) (string, error) {
 		if i > 0 {
 			n = fmt.Sprintf("%s-%d", name, i)
 		}
-		err := os.Link(src, n)
+		err := linkFile(src, n)
 		if err == nil {
 			return n, nil
 		}
 		if !errors.Is(err, fs.ErrExist) {
-			return "", err
+			b, rerr := os.ReadFile(src)
+			if rerr != nil {
+				return "", rerr
+			}
+			placed, cerr := createExclusive(n, b)
+			if cerr != nil {
+				return "", cerr
+			}
+			if placed {
+				return n, nil
+			}
 		}
 	}
 	return "", fmt.Errorf("no free name for %s", name)

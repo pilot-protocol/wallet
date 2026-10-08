@@ -389,3 +389,76 @@ func TestKeyVaultWarnsWhenCopiesDisagree(t *testing.T) {
 		t.Fatalf("no warning about the disagreeing copy:\n%s", logs.String())
 	}
 }
+
+// A copy that cannot be read is not "no copy": the restore stops with an
+// error (the wallet exits, the daemon retries) rather than restoring an older
+// key or letting a new one be created.
+func TestKeyVaultStopsOnACopyItCannotRead(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root reads mode-000 files")
+	}
+	f := newVaultFixture(t)
+	path := filepath.Join(f.install, "identity-evm.json")
+	newEVMKey(t, path)
+	if err := f.v.keep(path); err != nil {
+		t.Fatal(err)
+	}
+	newEVMKey(t, filepath.Join(f.backups, "20260901T000000.000000000Z-v0.3.2", "identity-evm.json")) // an older key
+	mirror := filepath.Join(f.v.dir, "identity-evm.json")
+	if err := os.Chmod(mirror, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(mirror, 0o600) })
+	if err := os.RemoveAll(f.install); err != nil {
+		t.Fatal(err)
+	}
+	if src, err := f.v.restore(path, validEVM); err == nil {
+		t.Fatalf("restore went on past an unreadable copy (restored %q)", src)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatal("a key was placed although the right copy could not be read")
+	}
+}
+
+// Where hard links are not supported (some network and FUSE homes), the copy
+// is still put in place, exclusively, and kept.
+func TestKeyVaultWorksWithoutHardLinks(t *testing.T) {
+	f := newVaultFixture(t)
+	prev := linkFile
+	linkFile = func(string, string) error { return os.ErrPermission }
+	t.Cleanup(func() { linkFile = prev })
+	path := filepath.Join(f.install, "identity-evm.json")
+	addr := newEVMKey(t, path)
+	if err := f.v.keep(path); err != nil {
+		t.Fatalf("keep without hard links: %v", err)
+	}
+	if err := os.RemoveAll(f.install); err != nil {
+		t.Fatal(err)
+	}
+	if src, err := f.v.restore(path, validEVM); err != nil || src == "" {
+		t.Fatalf("restore without hard links = %q, %v", src, err)
+	}
+	if got := evmAddr(t, path); got != addr {
+		t.Fatalf("restored %s, want %s", got, addr)
+	}
+}
+
+// A copy kept under another install path (HOME moved, another app root) is
+// not restored, but it stops a new key from being created.
+func TestKeyVaultWillNotCreateAKeyWhileAnotherCopyExists(t *testing.T) {
+	f := newVaultFixture(t)
+	other := newKeyVault(f.vaultDir, filepath.Join(t.TempDir(), "old-home", ".pilot", "apps", "io.pilot.wallet"), log.New(io.Discard, "", 0))
+	oldKey := filepath.Join(other.install, "identity-evm.json")
+	newEVMKey(t, oldKey)
+	if err := other.keep(oldKey); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(f.install, "identity-evm.json")
+	_, err := f.v.restore(path, validEVM)
+	if err == nil || !strings.Contains(err.Error(), other.dir) {
+		t.Fatalf("restore = %v; want it to refuse, naming %s", err, other.dir)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatal("another install's key was put in place")
+	}
+}

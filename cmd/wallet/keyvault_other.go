@@ -4,6 +4,11 @@
 
 package main
 
-import "io/fs"
+import (
+	"io/fs"
+	"os"
+)
 
 func ownedByMe(fs.FileInfo) bool { return true }
+
+func openNoFollow(path string) (*os.File, error) { return os.Open(path) }

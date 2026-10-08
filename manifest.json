@@ -44,6 +44,7 @@
     {"cap": "fs.read",  "target": "$HOME/.pilot/app-backups/io.pilot.wallet/*/*"},
     {"cap": "fs.read",  "target": "$HOME/.pilot/apps/.app-backups/io.pilot.wallet/*/*"},
     {"cap": "fs.read",  "target": "$HOME/.pilot/apps/io.pilot.wallet.previous-*/*"},
+    {"cap": "fs.read",  "target": "$HOME/.pilot/apps/io.pilot.wallet.previous/*"},
     {"cap": "fs.read",  "target": "$PILOT_APPSTORE_BACKUP_ROOT/io.pilot.wallet/*/*"},
     {"cap": "audit.log","target": "*"},
     {"cap": "net.dial", "target": "*.pilot",
