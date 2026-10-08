@@ -462,3 +462,50 @@ func TestKeyVaultWillNotCreateAKeyWhileAnotherCopyExists(t *testing.T) {
 		t.Fatal("another install's key was put in place")
 	}
 }
+
+// A mirror dir the wallet cannot search is not "no copy": the restore stops
+// (the wallet exits) rather than let a new key be created beside the old one.
+func TestKeyVaultStopsWhenItCannotSearchTheMirror(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root searches mode-000 dirs")
+	}
+	f := newVaultFixture(t)
+	path := filepath.Join(f.install, "identity-evm.json")
+	newEVMKey(t, path)
+	if err := f.v.keep(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(f.install); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(f.v.dir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(f.v.dir, 0o700) })
+	if src, err := f.v.restore(path, validEVM); err == nil {
+		t.Fatalf("restore went on with the mirror unsearchable (restored %q)", src)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatal("a key was placed although the mirror could not be searched")
+	}
+}
+
+// A backup is not restored when a copy kept under another install path holds
+// a different key: which one is right is in doubt.
+func TestKeyVaultWillNotRestoreOverADisagreeingCopyElsewhere(t *testing.T) {
+	f := newVaultFixture(t)
+	other := newKeyVault(f.vaultDir, filepath.Join(t.TempDir(), "old-home", ".pilot", "apps", "io.pilot.wallet"), log.New(io.Discard, "", 0))
+	oldKey := filepath.Join(other.install, "identity-evm.json")
+	newEVMKey(t, oldKey)
+	if err := other.keep(oldKey); err != nil {
+		t.Fatal(err)
+	}
+	newEVMKey(t, filepath.Join(f.backups, "20261001T000000.000000000Z-v0.3.3", "identity-evm.json")) // a different key
+	path := filepath.Join(f.install, "identity-evm.json")
+	if _, err := f.v.restore(path, validEVM); err == nil || !strings.Contains(err.Error(), "different key") {
+		t.Fatalf("restore = %v; want it to refuse over the disagreeing copy", err)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatal("a key was placed although another copy disagrees")
+	}
+}
