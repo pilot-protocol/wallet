@@ -51,7 +51,7 @@ const shutdownGrace = 5 * time.Second
 // Version is the wallet binary's release tag. Kept in sync with the
 // app_version field in manifest.json — `manifest_test.go` cross-checks
 // they agree, so a release without bumping both fails CI.
-const Version = "0.4.0"
+const Version = "0.4.1"
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
