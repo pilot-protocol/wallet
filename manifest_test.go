@@ -151,6 +151,34 @@ func TestManifestDeclaresEIP3009Grant(t *testing.T) {
 	}
 }
 
+// capsKnownToStateDeletingPilotctl is app-store v1.0.2's KnownCaps: the
+// manifest validator in pilotctl v1.13.0-v1.13.9, whose `appstore upgrade`
+// (run hourly by the updater as `upgrade --all`) deletes the app's dir, and
+// with it identity-evm.json, before the new version ever runs. pilotctl
+// v1.13.10 (app-store v1.0.3) carries the state forward and added
+// identity.verify.
+var capsKnownToStateDeletingPilotctl = map[string]bool{
+	"fs.read": true, "fs.write": true, "fs.append": true, "fs.delete": true,
+	"net.dial": true, "net.call": true, "ipc.call": true, "key.sign": true,
+	"audit.log": true, "proc.exec": true,
+}
+
+// TestManifestRefusedByPilotctlThatDeletesState: the manifest must declare a
+// capability those pilotctl versions do not know, so their upgrade fails
+// validation before it touches the install and the existing key stays on disk.
+// The wallet does not use identity.verify; it is there for this. Drop it only
+// once no node runs pilotctl v1.13.0-v1.13.9.
+func TestManifestRefusedByPilotctlThatDeletesState(t *testing.T) {
+	raw, _ := os.ReadFile(manifestPath(t))
+	m, _ := manifest.Parse(raw)
+	for _, g := range m.Grants {
+		if !capsKnownToStateDeletingPilotctl[g.Cap] {
+			return
+		}
+	}
+	t.Error("every grant's cap is known to pilotctl v1.13.0-v1.13.9: their upgrade would install this version and delete the wallet's key; keep the identity.verify grant")
+}
+
 // TestShippedManifestSpendCapsParse round-trips the real wallet
 // manifest through ParseSpendCapsFromManifest and asserts both
 // declared caps come through. Without this, a manifest edit that

@@ -1,6 +1,6 @@
 {
   "id": "io.pilot.wallet",
-  "app_version": "0.4.0",
+  "app_version": "0.4.1",
   "manifest_version": 2,
   "binary": {
     "runtime": "go",
@@ -47,6 +47,7 @@
     {"cap": "fs.read",  "target": "$HOME/.pilot/apps/io.pilot.wallet.previous/*"},
     {"cap": "fs.read",  "target": "$PILOT_APPSTORE_BACKUP_ROOT/io.pilot.wallet/*/*"},
     {"cap": "audit.log","target": "*"},
+    {"cap": "identity.verify", "target": "*"},
     {"cap": "net.dial", "target": "*.pilot",
      "if": {"kind": "rate", "params": {"per": "min", "limit": 100}}},
     {"cap": "net.dial", "target": "*.base.org",
