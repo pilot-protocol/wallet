@@ -83,10 +83,10 @@ func TestKeyVaultBringsTheKeyBackAfterTheInstallDirIsGone(t *testing.T) {
 	if err := f.v.keep(path); err != nil {
 		t.Fatal(err)
 	}
-	if fi, err := os.Stat(f.vaultDir); err != nil || fi.Mode().Perm() != 0o700 {
+	if fi, err := os.Stat(f.v.dir); err != nil || fi.Mode().Perm() != 0o700 {
 		t.Fatalf("vault dir: %v, mode %v; want 0700", err, fi.Mode().Perm())
 	}
-	if fi, err := os.Stat(filepath.Join(f.vaultDir, "identity-evm.json")); err != nil || fi.Mode().Perm() != 0o600 {
+	if fi, err := os.Stat(filepath.Join(f.v.dir, "identity-evm.json")); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("vault copy: %v; want mode 0600", err)
 	}
 
@@ -94,7 +94,7 @@ func TestKeyVaultBringsTheKeyBackAfterTheInstallDirIsGone(t *testing.T) {
 		t.Fatal(err)
 	}
 	src, err := f.v.restore(path, validEVM)
-	if err != nil || src != filepath.Join(f.vaultDir, "identity-evm.json") {
+	if err != nil || src != filepath.Join(f.v.dir, "identity-evm.json") {
 		t.Fatalf("restore = %q, %v; want it from the vault", src, err)
 	}
 	if got := evmAddr(t, path); got != addr {
@@ -132,10 +132,10 @@ func TestKeyVaultBringsTheKeyBackFromPilotctlBackups(t *testing.T) {
 // A copy that does not load as a key is never put in place of a missing one.
 func TestKeyVaultSkipsACorruptCopy(t *testing.T) {
 	f := newVaultFixture(t)
-	if err := os.MkdirAll(f.vaultDir, 0o700); err != nil {
+	if err := os.MkdirAll(f.v.dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(f.vaultDir, "identity-evm.json"), []byte("{not a key"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(f.v.dir, "identity-evm.json"), []byte("{not a key"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	want := newEVMKey(t, filepath.Join(f.backups, "20261001T000000.000000000Z-v0.3.3", "identity-evm.json"))
@@ -164,10 +164,10 @@ func TestKeyVaultNeverLosesADifferentKey(t *testing.T) {
 	if err := f.v.keep(path); err != nil {
 		t.Fatal(err)
 	}
-	if got := evmAddr(t, filepath.Join(f.vaultDir, "identity-evm.json")); got != second {
+	if got := evmAddr(t, filepath.Join(f.v.dir, "identity-evm.json")); got != second {
 		t.Fatalf("vault holds %s, want the live key %s", got, second)
 	}
-	matches, _ := filepath.Glob(filepath.Join(f.vaultDir, "identity-evm.json.replaced-*"))
+	matches, _ := filepath.Glob(filepath.Join(f.v.dir, "identity-evm.json.replaced-*"))
 	if len(matches) != 1 {
 		t.Fatalf("kept copies %v, want the first key kept once", matches)
 	}
@@ -217,5 +217,175 @@ func TestKeyVaultCoversTheOverlayIdentity(t *testing.T) {
 	}
 	if !strings.EqualFold(string(s.PublicKey()), string(s2.PublicKey())) {
 		t.Fatal("the overlay identity came back as a different key")
+	}
+}
+
+// Each install path has its own mirror: a second wallet with other paths (a
+// dev run, a test) neither gets this one's key nor replaces its copy.
+func TestKeyVaultMirrorIsPerInstallPath(t *testing.T) {
+	f := newVaultFixture(t)
+	real := filepath.Join(f.install, "identity-evm.json")
+	realAddr := newEVMKey(t, real)
+	if err := f.v.keep(real); err != nil {
+		t.Fatal(err)
+	}
+	devDir := filepath.Join(filepath.Dir(f.install), "..", "..", "dev", "wallet")
+	dev := newKeyVault(f.vaultDir, devDir, log.New(io.Discard, "", 0))
+	if dev.dir == f.v.dir {
+		t.Fatalf("two install paths share the mirror %s", dev.dir)
+	}
+	devKey := filepath.Join(devDir, "identity-evm.json")
+	if src, err := dev.restore(devKey, validEVM); err != nil || src != "" {
+		t.Fatalf("the dev wallet was given a copy (%q, %v); want a new key of its own", src, err)
+	}
+	newEVMKey(t, devKey)
+	if err := dev.keep(devKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(f.install); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.v.restore(real, validEVM); err != nil {
+		t.Fatal(err)
+	}
+	if got := evmAddr(t, real); got != realAddr {
+		t.Fatalf("restored %s, want this install's own key %s", got, realAddr)
+	}
+}
+
+// A mirror copy that cannot be read is never overwritten: keep fails.
+func TestKeyVaultKeepLeavesAnUnreadableCopy(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root reads mode-000 files")
+	}
+	f := newVaultFixture(t)
+	path := filepath.Join(f.install, "identity-evm.json")
+	newEVMKey(t, path)
+	if err := os.MkdirAll(f.v.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	locked := filepath.Join(f.v.dir, "identity-evm.json")
+	if err := os.WriteFile(locked, []byte("someone's key"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o600) })
+	if err := f.v.keep(path); err == nil {
+		t.Fatal("keep replaced a copy it could not read")
+	}
+	_ = os.Chmod(locked, 0o600)
+	if b, _ := os.ReadFile(locked); string(b) != "someone's key" {
+		t.Fatalf("the unreadable copy was changed: %q", b)
+	}
+}
+
+// Keys replaced within the same second each keep a copy of their own.
+func TestKeyVaultReplacedCopiesNeverCollide(t *testing.T) {
+	f := newVaultFixture(t)
+	path := filepath.Join(f.install, "identity-evm.json")
+	var addrs []string
+	for i := 0; i < 3; i++ {
+		_ = os.Remove(path)
+		addrs = append(addrs, newEVMKey(t, path))
+		if err := f.v.keep(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := map[string]bool{evmAddr(t, filepath.Join(f.v.dir, "identity-evm.json")): true}
+	matches, _ := filepath.Glob(filepath.Join(f.v.dir, "identity-evm.json.replaced-*"))
+	for _, m := range matches {
+		got[evmAddr(t, m)] = true
+	}
+	for _, a := range addrs {
+		if !got[a] {
+			t.Fatalf("key %s is gone from the vault (have %v)", a, got)
+		}
+	}
+}
+
+// A restore never replaces a key file that appeared while it ran.
+func TestKeyVaultRestoreNeverOverwritesAKeyThatAppeared(t *testing.T) {
+	f := newVaultFixture(t)
+	path := filepath.Join(f.install, "identity-evm.json")
+	newEVMKey(t, path)
+	if err := f.v.keep(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	var appeared string
+	racing := func(p string) error {
+		if appeared == "" { // another start creates the key during validation
+			appeared = newEVMKey(t, path)
+		}
+		return validEVM(p)
+	}
+	if src, err := f.v.restore(path, racing); err != nil || src != "" {
+		t.Fatalf("restore = %q, %v; want it to stand back", src, err)
+	}
+	if got := evmAddr(t, path); got != appeared {
+		t.Fatalf("the key that appeared was replaced: %s, want %s", got, appeared)
+	}
+}
+
+// Backups are ordered by the stamp pilotctl names them with, not by mtime.
+func TestKeyVaultPrefersTheNewestBackupByItsStamp(t *testing.T) {
+	f := newVaultFixture(t)
+	older := filepath.Join(f.backups, "20260901T000000.000000000Z-v0.3.2", "identity-evm.json")
+	newer := filepath.Join(f.backups, "20261001T000000.000000000Z-v0.3.3", "identity-evm.json")
+	newEVMKey(t, older)
+	want := newEVMKey(t, newer)
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(newer, old, old); err != nil { // the newer backup has the older mtime
+		t.Fatal(err)
+	}
+	path := filepath.Join(f.install, "identity-evm.json")
+	if _, err := f.v.restore(path, validEVM); err != nil {
+		t.Fatal(err)
+	}
+	if got := evmAddr(t, path); got != want {
+		t.Fatalf("restored %s, want the newest stamp's %s", got, want)
+	}
+}
+
+// A symlink in the backups, or a dir that only starts like a previous
+// install, is not a copy of this wallet's key.
+func TestKeyVaultIgnoresSymlinksAndLookalikeDirs(t *testing.T) {
+	f := newVaultFixture(t)
+	elsewhere := filepath.Join(t.TempDir(), "planted.json")
+	newEVMKey(t, elsewhere)
+	link := filepath.Join(f.backups, "20261001T000000.000000000Z-v0.3.3", "identity-evm.json")
+	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, link); err != nil {
+		t.Fatal(err)
+	}
+	newEVMKey(t, filepath.Join(f.install+".previouslyinstalled", "identity-evm.json"))
+	path := filepath.Join(f.install, "identity-evm.json")
+	if src, err := f.v.restore(path, validEVM); err != nil || src != "" {
+		t.Fatalf("restore = %q, %v; want nothing restored", src, err)
+	}
+}
+
+// When the copy restored and another usable copy disagree, it says so.
+func TestKeyVaultWarnsWhenCopiesDisagree(t *testing.T) {
+	f := newVaultFixture(t)
+	var logs strings.Builder
+	f.v.logger = log.New(&logs, "", 0)
+	path := filepath.Join(f.install, "identity-evm.json")
+	newEVMKey(t, path)
+	if err := f.v.keep(path); err != nil {
+		t.Fatal(err)
+	}
+	newEVMKey(t, filepath.Join(f.backups, "20261001T000000.000000000Z-v0.3.3", "identity-evm.json"))
+	if err := os.RemoveAll(f.install); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.v.restore(path, validEVM); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "WARNING") || !strings.Contains(logs.String(), "holds a different key") {
+		t.Fatalf("no warning about the disagreeing copy:\n%s", logs.String())
 	}
 }

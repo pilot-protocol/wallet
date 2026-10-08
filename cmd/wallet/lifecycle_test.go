@@ -33,6 +33,21 @@ import (
 //	                         then blocks until it is killed.
 //	WALLET_TEST_ROLE=wallet  runs the real main() with WALLET_TEST_ARGS.
 func TestMain(m *testing.M) {
+	if os.Getenv("WALLET_TEST_ROLE") == "" {
+		// No test may touch the real ~/.pilot: run() defaults the EVM key
+		// and the key vault there, and a test run once copied a developer's
+		// real key into the vault. A private HOME for the whole package,
+		// inherited by the helper processes below.
+		home, err := os.MkdirTemp("", "wallet-test-home-")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		os.Setenv("HOME", home)
+		code := m.Run()
+		os.RemoveAll(home)
+		os.Exit(code)
+	}
 	switch os.Getenv("WALLET_TEST_ROLE") {
 	case "parent":
 		os.Exit(fakeDaemon())
