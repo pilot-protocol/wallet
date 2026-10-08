@@ -128,7 +128,8 @@ jobs:
           # layout pilotctl installs.
           python3 scripts/pack-bundle.py stage "out/$ARCHIVE" "$(git log -1 --format=%ct)"
           tar -tvzf "out/$ARCHIVE"
-          shasum -a 256 "out/$ARCHIVE" > "out/$ARCHIVE.sha256"
+          # The bare file name: publish checks these from another dir.
+          (cd out && shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256")
 
       - uses: actions/upload-artifact@v7
         with:
