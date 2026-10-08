@@ -78,6 +78,7 @@ func run(ctx context.Context, args []string) error {
 		evmChains        = fs.String("evm-chains", "8453,1,137", "comma-separated EVM chain IDs to enable. First is primary (used when wallet.evm.* requests omit chain_id). Known: 1=Ethereum, 8453=Base, 137=Polygon, 84532=Base Sepolia. $PILOT_EVM_CHAINS overrides this when --evm-chains was left at the default.")
 		evmRPC           = fs.String("evm-rpc", "", "PRIMARY chain's JSON-RPC endpoint. For per-chain endpoints use PILOT_EVM_RPC_<CHAINID> env vars (e.g. PILOT_EVM_RPC_137=https://polygon-rpc.com). Falls back to $PILOT_EVM_RPC for the primary chain.")
 		evmOff           = fs.Bool("no-evm", false, "disable every wallet.evm.* method (no secp256k1 key created)")
+		keyVaultDir      = fs.String("key-vault", defaultKeyVaultDir(), "dir outside the install dir where the wallet keeps a copy of its identity files, and restores a missing one from instead of creating a new key; empty disables")
 		settlerAddr      = fs.String("settler-addr", "", "TCP endpoint of the pilot-protocol/settler service (host:port). Empty disables wallet.settler.* methods. Env: PILOT_SETTLER_ADDR.")
 		settlerPubkeyHex = fs.String("settler-pubkey", "", "expected settler ed25519 pubkey (hex) — when set, the wallet refuses to start if the live settler advertises a different pubkey. Env: PILOT_SETTLER_PUBKEY.")
 		showVer          = fs.Bool("version", false, "print version and exit")
@@ -109,9 +110,19 @@ func run(ctx context.Context, args []string) error {
 	}
 	logger.Printf("starting addr=%s db=%s socket=%s identity=%s", *addr, *dbPath, *sockPath, *idPath)
 
+	// Bring back an identity file the install dir lost (uninstall, an old
+	// pilotctl's upgrade) before one would be created, and keep a copy of it
+	// outside the install dir. See keyVault.
+	idVault := newKeyVault(*keyVaultDir, filepath.Dir(*idPath), logger)
+	if _, err := idVault.restore(*idPath, func(p string) error { _, err := wallet.LoadLocalSigner(p); return err }); err != nil {
+		return fmt.Errorf("identity: restore: %w", err)
+	}
 	signer, err := wallet.LoadOrCreateLocalSigner(*idPath)
 	if err != nil {
 		return fmt.Errorf("identity: %w", err)
+	}
+	if err := idVault.keep(*idPath); err != nil {
+		logger.Printf("key vault: could not keep a copy of %s: %v", *idPath, err)
 	}
 
 	store, err := openStore(*dbPath)
@@ -141,9 +152,16 @@ func run(ctx context.Context, args []string) error {
 	if *evmOff {
 		w = wallet.New(wallet.Address(*addr), signer, store)
 	} else {
+		evmVault := newKeyVault(*keyVaultDir, filepath.Dir(*evmIDPath), logger)
+		if _, err := evmVault.restore(*evmIDPath, func(p string) error { _, err := evm.LoadEVMSigner(p); return err }); err != nil {
+			return fmt.Errorf("evm identity: restore: %w", err)
+		}
 		evmSigner, err := evm.LoadOrCreateEVMSigner(*evmIDPath)
 		if err != nil {
 			return fmt.Errorf("evm identity: %w", err)
+		}
+		if err := evmVault.keep(*evmIDPath); err != nil {
+			logger.Printf("key vault: could not keep a copy of %s: %v", *evmIDPath, err)
 		}
 		chainsArg := *evmChains
 		if chainsArg == "8453,1,137" { // default — let env override
