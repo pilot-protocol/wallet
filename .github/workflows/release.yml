@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 env:
-  EXPECTED_PUBLISHER: ed25519:VF8fdEP/Oe2aWN3ozQ7Ar22137tHb7dkSw0hlzlk/os=
+  EXPECTED_PUBLISHER: ed25519:xAD0ai5GYWo8v0cmdhytZYRjSbi2edgEthWkBnO+1ik=
   # pilotctl that signs the manifests. Pinned to a release tag: this step
   # handles the publisher private key, so it must not build whatever is on
   # pilotprotocol's main branch at release time.
