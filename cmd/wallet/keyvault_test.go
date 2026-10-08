@@ -509,3 +509,38 @@ func TestKeyVaultWillNotRestoreOverADisagreeingCopyElsewhere(t *testing.T) {
 		t.Fatal("a key was placed although another copy disagrees")
 	}
 }
+
+// A copy kept under another install path that holds the same key as the copy
+// restored is no conflict, even when the identity file's dir does not exist yet.
+func TestKeyVaultRestoresWhenACopyElsewhereAgrees(t *testing.T) {
+	f := newVaultFixture(t)
+	path := filepath.Join(f.install, "identity-evm.json")
+	addr := newEVMKey(t, path)
+	other := newKeyVault(f.vaultDir, filepath.Join(t.TempDir(), "old-home", ".pilot", "apps", "io.pilot.wallet"), log.New(io.Discard, "", 0))
+	oldKey := filepath.Join(other.install, "identity-evm.json")
+	if err := os.MkdirAll(other.install, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(oldKey, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := other.keep(oldKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.v.keep(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(f.install); err != nil { // the dir itself is gone
+		t.Fatal(err)
+	}
+	if src, err := f.v.restore(path, validEVM); err != nil || src == "" {
+		t.Fatalf("restore = %q, %v; want the agreeing copy restored", src, err)
+	}
+	if got := evmAddr(t, path); got != addr {
+		t.Fatalf("restored %s, want %s", got, addr)
+	}
+}

@@ -288,6 +288,9 @@ func (v *keyVault) otherCopies(name, liveDir string, valid func(string) error) (
 			paths = append(paths, filepath.Join(d, name))
 		}
 	}
+	if err := os.MkdirAll(liveDir, 0o700); err != nil { // the temp files below are validated there
+		return nil, err
+	}
 	var out []otherCopy
 	for _, p := range paths {
 		fi, err := os.Lstat(p)
