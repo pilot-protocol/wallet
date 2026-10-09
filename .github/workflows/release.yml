@@ -156,7 +156,7 @@ jobs:
           cd release
           sha256sum --check ./*.sha256
           sha256sum ./*.tar.gz > checksums.txt
-      - uses: actions/attest-build-provenance@v3
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: release/*.tar.gz
       - name: Publish GitHub release
