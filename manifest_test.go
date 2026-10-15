@@ -191,7 +191,8 @@ func TestShippedManifestSpendCapsParse(t *testing.T) {
 	if len(caps) != 3 {
 		t.Fatalf("parsed %d caps from shipped manifest, want 3 (x402-auth + evm-eip3009 + settler-transfer)", len(caps))
 	}
-	// All caps target USDC, window=24h, limit=100 (per manifest.json).
+	// All caps target USDC, window=24h, limit=10000000000 minor units, which is
+	// 10,000 USDC a day (per manifest.json): a ceiling; hosts set a lower limit.
 	for i, c := range caps {
 		if c.Asset != "USDC" {
 			t.Errorf("caps[%d].Asset = %q, want USDC", i, c.Asset)
@@ -199,8 +200,8 @@ func TestShippedManifestSpendCapsParse(t *testing.T) {
 		if c.Window != 24*time.Hour {
 			t.Errorf("caps[%d].Window = %s, want 24h", i, c.Window)
 		}
-		if c.Limit != 100 {
-			t.Errorf("caps[%d].Limit = %d, want 100", i, c.Limit)
+		if c.Limit != 10_000_000_000 {
+			t.Errorf("caps[%d].Limit = %d, want 10000000000 (10,000 USDC)", i, c.Limit)
 		}
 	}
 	// The grants target different sign-purposes; without the
