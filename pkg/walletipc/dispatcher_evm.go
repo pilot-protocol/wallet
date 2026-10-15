@@ -2,12 +2,15 @@ package walletipc
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 
 	"github.com/pilot-protocol/app-store/pkg/ipc"
 	"github.com/pilot-protocol/app-store/pkg/payment"
+	"github.com/pilot-protocol/wallet/pkg/evm"
 	"github.com/pilot-protocol/wallet/pkg/wallet"
 )
 
@@ -32,6 +35,43 @@ func RegisterEVM(d *ipc.Dispatcher, w *wallet.Wallet) {
 	d.Register(MethodEVMSatisfy, evmSatisfyHandler(w))
 	d.Register(MethodEVMVerify, evmVerifyHandler(w))
 	d.Register(MethodEVMChains, evmChainsHandler(w))
+	d.Register(MethodEVMSignTransfer, evmSignTransferHandler(w))
+}
+
+func evmSignTransferHandler(w *wallet.Wallet) ipc.Handler {
+	return func(ctx context.Context, env *ipc.Envelope) (json.RawMessage, error) {
+		var req EVMSignTransferReq
+		if err := json.Unmarshal(env.Payload, &req); err != nil {
+			return nil, fmt.Errorf("decode sign_transfer req: %w", err)
+		}
+		to, err := evm.ParseAddress(req.To)
+		if err != nil {
+			return nil, fmt.Errorf("wallet.evm.sign_transfer: to: %w", err)
+		}
+		num := func(name, s string) (*big.Int, error) {
+			n, ok := new(big.Int).SetString(s, 10)
+			if !ok {
+				return nil, fmt.Errorf("wallet.evm.sign_transfer: %s must be a decimal number", name)
+			}
+			return n, nil
+		}
+		t := wallet.TransferTx{To: to, Nonce: req.Nonce}
+		for _, f := range []struct {
+			name, s string
+			dst     **big.Int
+		}{{"amount", req.Amount, &t.Amount}, {"gas", req.Gas, &t.Gas}, {"max_fee_per_gas", req.MaxFee, &t.MaxFee}, {"max_priority_fee_per_gas", req.MaxPriorityFee, &t.MaxPriorityFee}} {
+			if *f.dst, err = num(f.name, f.s); err != nil {
+				return nil, err
+			}
+		}
+		chainID := chainOrPrimary(w, req.ChainID)
+		raw, hash, err := w.SignUSDCTransferOn(ctx, chainID, t)
+		if err != nil {
+			return nil, err
+		}
+		return encode(EVMSignTransferResp{RawTx: "0x" + hex.EncodeToString(raw), Hash: "0x" + hex.EncodeToString(hash),
+			From: w.EVMAddress().Hex(), To: to.Hex(), Amount: t.Amount.String(), ChainID: chainID})
+	}
 }
 
 // chainOrPrimary returns the requested chain id when non-zero, or the

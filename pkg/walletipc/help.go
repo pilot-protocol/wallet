@@ -46,6 +46,7 @@ var helpEVM = []helpMethod{
 	{MethodEVMAddress, "This wallet's EVM address on a chain.", map[string]string{"chain_id": "int — omit for the primary chain"}, "fast"},
 	{MethodEVMBalance, "USDC balance on a chain.", map[string]string{"chain_id": "int — omit for the primary chain"}, "med"},
 	{MethodEVMSatisfy, "Pay an x402 payment contract with an EIP-3009 authorization. Enforced against spend caps.", map[string]string{"contract": "object (required) — the x402 payment contract", "chain_id": "int"}, "med"},
+	{MethodEVMSignTransfer, "Sign a USDC transfer from this wallet as an EIP-1559 transaction, gas paid from its own ETH; the caller broadcasts the raw transaction. Enforced against spend caps.", map[string]string{"to": "string (required) — recipient address", "amount": "string (required) — USDC in its smallest unit", "nonce": "int (required)", "gas": "string (required) — at most 200000", "max_fee_per_gas": "string (required) — wei, at most 100 gwei", "max_priority_fee_per_gas": "string (required) — wei", "chain_id": "int"}, "fast"},
 	{MethodEVMVerify, "Verify an x402 receipt against its contract.", map[string]string{"contract": "object (required)", "receipt": "object (required)", "chain_id": "int"}, "med"},
 }
 

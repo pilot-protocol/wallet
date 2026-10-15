@@ -13,16 +13,16 @@ import "github.com/pilot-protocol/wallet/pkg/wallet"
 // `ipc.call:wallet.<method>` grants. Keep these constants in sync with
 // the manifest at /manifest.json.
 const (
-	MethodBalance    = "wallet.balance"
-	MethodBalances   = "wallet.balances"
-	MethodAddress    = "wallet.address"
-	MethodRequest    = "wallet.request"
-	MethodPay        = "wallet.pay"
-	MethodVerify     = "wallet.verify"
-	MethodSettle     = "wallet.settle"
-	MethodTopup      = "wallet.topup"
-	MethodHistory    = "wallet.history"
-	MethodSpendCaps  = "wallet.spend_caps"
+	MethodBalance   = "wallet.balance"
+	MethodBalances  = "wallet.balances"
+	MethodAddress   = "wallet.address"
+	MethodRequest   = "wallet.request"
+	MethodPay       = "wallet.pay"
+	MethodVerify    = "wallet.verify"
+	MethodSettle    = "wallet.settle"
+	MethodTopup     = "wallet.topup"
+	MethodHistory   = "wallet.history"
+	MethodSpendCaps = "wallet.spend_caps"
 
 	// EVM / x402 surface — only registered when the wallet was
 	// constructed with EVM support. Callers can probe via Has() in
@@ -30,8 +30,12 @@ const (
 	MethodEVMAddress = "wallet.evm.address"
 	MethodEVMBalance = "wallet.evm.balance"
 	MethodEVMSatisfy = "wallet.evm.satisfy"
-	MethodEVMVerify  = "wallet.evm.verify"
-	MethodEVMChains  = "wallet.evm.chains"
+	// MethodEVMSignTransfer signs a USDC transfer from this wallet as an
+	// EIP-1559 transaction, gas paid from its own ETH, for the host to
+	// broadcast. Counted against the spend caps.
+	MethodEVMSignTransfer = "wallet.evm.sign_transfer"
+	MethodEVMVerify       = "wallet.evm.verify"
+	MethodEVMChains       = "wallet.evm.chains"
 
 	// Settler surface — only registered when the wallet was wired
 	// with a settler client at startup. Routes IPC calls through
@@ -55,7 +59,7 @@ var AllMethods = []string{
 // wallet has EVM support. NewDispatcher returns AllMethods + (this set
 // when applicable).
 var AllEVMMethods = []string{
-	MethodEVMAddress, MethodEVMBalance, MethodEVMSatisfy, MethodEVMVerify, MethodEVMChains,
+	MethodEVMAddress, MethodEVMBalance, MethodEVMSatisfy, MethodEVMVerify, MethodEVMChains, MethodEVMSignTransfer,
 }
 
 // AllSettlerMethods is the wallet-side settler surface. Like AllEVMMethods,
@@ -223,6 +227,27 @@ type EVMSatisfyResp struct {
 	Receipt any `json:"receipt"` // payment.Receipt
 }
 
+// EVMSignTransferReq asks for a signed USDC transfer. Numbers are decimal
+// strings: amount in the token's smallest unit, fees in wei per gas.
+type EVMSignTransferReq struct {
+	ChainID        uint64 `json:"chain_id,omitempty"`
+	To             string `json:"to"`
+	Amount         string `json:"amount"`
+	Nonce          uint64 `json:"nonce"`
+	Gas            string `json:"gas"`
+	MaxFee         string `json:"max_fee_per_gas"`
+	MaxPriorityFee string `json:"max_priority_fee_per_gas"`
+}
+
+type EVMSignTransferResp struct {
+	RawTx   string `json:"raw_tx"` // 0x…, for eth_sendRawTransaction
+	Hash    string `json:"hash"`   // the transaction's id on chain
+	From    string `json:"from"`
+	To      string `json:"to"`
+	Amount  string `json:"amount"`
+	ChainID uint64 `json:"chain_id"`
+}
+
 type EVMVerifyReq struct {
 	ChainID  uint64 `json:"chain_id,omitempty"`
 	Contract any    `json:"contract"` // payment.Contract
@@ -296,9 +321,9 @@ type SettlerTransaction struct {
 }
 
 type SettlerTransferReq struct {
-	To               string `json:"to"`                // hex ed25519 pubkey
-	Asset            string `json:"asset"`             // e.g. "USDC"
-	Amount           uint64 `json:"amount"`            // smallest unit
+	To               string `json:"to"`     // hex ed25519 pubkey
+	Asset            string `json:"asset"`  // e.g. "USDC"
+	Amount           uint64 `json:"amount"` // smallest unit
 	Memo             string `json:"memo,omitempty"`
 	ExpiresInSeconds int64  `json:"expires_in_seconds,omitempty"` // 0 → 5 min default
 }
