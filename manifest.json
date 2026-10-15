@@ -1,6 +1,6 @@
 {
   "id": "io.pilot.wallet",
-  "app_version": "0.4.1",
+  "app_version": "0.4.2",
   "manifest_version": 2,
   "binary": {
     "runtime": "go",
@@ -55,11 +55,11 @@
     {"cap": "net.dial", "target": "settler:9100",
      "if": {"kind": "rate", "params": {"per": "min", "limit": 120}}},
     {"cap": "key.sign", "target": "x402-auth",
-     "if": {"kind": "cap", "params": {"asset": "USDC", "per": "day", "limit": 100}}},
+     "if": {"kind": "cap", "params": {"asset": "USDC", "per": "day", "limit": 10000000000}}},
     {"cap": "key.sign", "target": "evm-eip3009",
-     "if": {"kind": "cap", "params": {"asset": "USDC", "per": "day", "limit": 100}}},
+     "if": {"kind": "cap", "params": {"asset": "USDC", "per": "day", "limit": 10000000000}}},
     {"cap": "key.sign", "target": "settler-transfer",
-     "if": {"kind": "cap", "params": {"asset": "USDC", "per": "day", "limit": 100}}}
+     "if": {"kind": "cap", "params": {"asset": "USDC", "per": "day", "limit": 10000000000}}}
   ],
   "protection": "guarded",
   "store": {
