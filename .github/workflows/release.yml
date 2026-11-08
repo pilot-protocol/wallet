@@ -19,6 +19,11 @@ env:
   # handles the publisher private key, so it must not build whatever is on
   # pilotprotocol's main branch at release time.
   PILOTCTL_REF: v1.13.10
+  # The Go toolchain the wallet binaries are built and tested with (it also
+  # builds the signing-only pilotctl above). Go 1.25 is end of life, and
+  # GO-2026-6809 in crypto/x509 is fixed only in 1.26.10 and 1.27.3. go.mod's
+  # go line is left alone; only the toolchain moves.
+  GO_VERSION: "1.27.3"
 
 jobs:
   test:
@@ -29,7 +34,7 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.25'
+          go-version: ${{ env.GO_VERSION }}
           cache: true
       - run: go test -race -timeout 3m ./...
 
@@ -67,7 +72,7 @@ jobs:
           ref: ${{ env.PILOTCTL_REF }}
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.25'
+          go-version: ${{ env.GO_VERSION }}
           cache: true
 
       - name: Resolve release version
@@ -96,6 +101,8 @@ jobs:
             *) echo "::error::wrong executable format for $GOOS/$GOARCH: $FILE_OUTPUT"; exit 1 ;;
           esac
           test "$(stage/bin/wallet -version)" = "${{ steps.version.outputs.version }}"
+          go version stage/bin/wallet
+          go version stage/bin/wallet | grep -q ": go${GO_VERSION}\$"
 
       - name: Pin binary and sign manifest
         env:
